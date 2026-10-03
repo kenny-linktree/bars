@@ -22,9 +22,18 @@ The repository and branch are the trust boundary: each Mac builds whatever it fe
 
 The bootstrap checks that the account can write to `/Applications` before fetching or building, and the installer repeats that check and also refuses to replace a `Bars.app` owned by another account, so a standard account or a second user changes nothing. The previous bundle is unregistered from Launch Services and the widget gallery before its staged copy is deleted, so no registration names a removed path. The installer waits up to 160 seconds for a running refresh, and each install empties `logs/launchd.log`. It then copies Bars to `/Applications`, installs the collector under `~/Library/Application Support/Bars`, registers the widget, starts the per-user LaunchAgent and launches the menu bar app. After the bundle swap it ends any widget extension or Bars process still running a previous build and requests a fresh widget timeline, while holding the refresh lock, so later widget timelines use the new binary. WidgetKit still controls when the desktop redraws. See [Troubleshooting](troubleshooting.md#widget-shows-old-ui-or-data-while-the-dropdown-is-current) for why.
 
+macOS shows a "Background Items Added" notice for the scheduled collector. Turning it off in Login Items stops collection. Bars never runs `sudo` or requests an administrator password; Apple's separate Command Line Tools installer may ask for administrator approval.
+
+Append options after the second `bars-bootstrap.sh` in the README install command. `--help` lists them. The downloaded script can be deleted after installation; later commands can use the copy under `~/Library/Application Support/Bars/src/scripts/`.
+
 `--no-start` installs without loading the scheduled job or launching the app in the current login session; the LaunchAgent remains installed for future logins. If Bars was already running, the installer still relaunches it on the new build.
 
 ## Provider selection
+
+```sh
+sh "$HOME/Library/Application Support/Bars/src/scripts/bootstrap.sh" --disable cursor --disable codex
+sh "$HOME/Library/Application Support/Bars/src/scripts/bootstrap.sh" --enable-all
+```
 
 A first install asks the collector (`python3 -m bars_collector --detect`, which makes no network request) which providers have local login material, disables the rest and prints one line per provider. If detection itself fails, every provider stays enabled rather than one being hidden by mistake.
 

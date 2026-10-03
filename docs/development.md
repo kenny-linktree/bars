@@ -1,6 +1,37 @@
 # Development
 
-Notes for changing Bars locally: previewing UI without reinstalling, the Swift checks that run without Xcode, Python compatibility and testing the installer safely. Build, install and test commands are in the [README](../README.md#development).
+Build, test and preview Bars from a separate checkout. The installer manages its own source clone and replaces tracked changes there during updates.
+
+## Build
+
+From a checkout:
+
+```sh
+scripts/build.sh --toolchain clt
+/usr/bin/python3 scripts/install.py \
+  --app .build/native/Release/Bars.app \
+  --python /usr/bin/python3
+```
+
+`--python` is the interpreter the scheduled collector uses, so give a stable path. `scripts/build.sh` also accepts `--toolchain auto|xcode`, `--configuration Debug|Release` and `--output DIR`. Full Xcode is optional. `scripts/install.py` accepts the same `--disable`, `--enable-all`, `--no-start` and `--uninstall [--keep-data]` options as the bootstrap.
+
+## Tests
+
+These checks use synthetic responses and isolated temporary files, without provider credentials. Run the Python suites under both `/usr/bin/python3` (the 3.9 floor) and a current CPython:
+
+```sh
+PYTHONPATH=collector python3 -m unittest discover -s tests/collector -v
+python3 -m unittest discover -s tests/integration -v
+sh -n scripts/bootstrap.sh
+scripts/preview/render.sh --check
+swiftc macOS/Shared/Snapshot.swift \
+  macOS/Shared/UsagePresentation.swift \
+  macOS/Shared/SnapshotStore.swift \
+  tests/Swift/SnapshotTests.swift -o /tmp/bars-core-checks
+/tmp/bars-core-checks
+```
+
+The direct Swift command works with the Command Line Tools, which omit XCTest. The package also provides an XCTest path through `swift test` when full Xcode is selected; that path and the Xcode build have not been exercised yet. [Verification](verification.md) records tested results and remaining limits.
 
 ## Preview renders
 
@@ -25,7 +56,7 @@ scripts/preview/render.sh --help
 
 ## Swift checks without Xcode
 
-The Command Line Tools omit XCTest, so the core checks compile the three Foundation-only shared files together with `tests/Swift/SnapshotTests.swift` using `swiftc` (see [Tests](../README.md#tests)). Keep SwiftUI and AppKit out of `macOS/Shared/Snapshot.swift`, `macOS/Shared/UsagePresentation.swift` and `macOS/Shared/SnapshotStore.swift`; importing either breaks that path and the `BarsCore` package target in `Package.swift`, which excludes the SwiftUI file `ProviderRow.swift`. With full Xcode selected, `swift test` runs the same checks through XCTest.
+The Command Line Tools omit XCTest, so the core checks compile the three Foundation-only shared files together with `tests/Swift/SnapshotTests.swift` using `swiftc` (see [Tests](#tests)). Keep SwiftUI and AppKit out of `macOS/Shared/Snapshot.swift`, `macOS/Shared/UsagePresentation.swift` and `macOS/Shared/SnapshotStore.swift`; importing either breaks that path and the `BarsCore` package target in `Package.swift`, which excludes the SwiftUI file `ProviderRow.swift`. With full Xcode selected, `swift test` runs the same checks through XCTest.
 
 ## Synthetic performance measurements
 
