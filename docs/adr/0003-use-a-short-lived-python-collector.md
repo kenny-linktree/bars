@@ -1,0 +1,3 @@
+# Use a short-lived Python collector
+
+Bars will use an independent Python collector that writes a JSON snapshot and exits after each scheduled refresh. Python was selected after measuring its startup and import overhead; this keeps collection independent of the Swift host and widget while avoiding a resident collector between runs. Python requires an interpreter on each Mac; [ADR 0005](0005-distribute-by-source-bootstrap.md) later settled on the Command Line Tools' Python 3.9. Measurements of complete runs with authentication and real requests are in [collector/README.md](../../collector/README.md#initial-resource-measurement).

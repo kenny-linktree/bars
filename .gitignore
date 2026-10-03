@@ -1,0 +1,19 @@
+.DS_Store
+.build/
+build/
+dist/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.coverage
+runtime/
+*.xcuserstate
+xcuserdata/
+# Local tool settings and environment files can hold personal paths or secrets.
+*.local.json
+.env
+.env.*
+# Per-tool local directories; shared agent instructions live in AGENTS.md and docs/.
+.claude/

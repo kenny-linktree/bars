@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in Bars does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Leave out tokens, account or organization IDs, real usage figures and live preview images. Synthetic values and the fixed error text shown by Bars are enough.
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "26.0"
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version used by the installer
+      description: Output of `/usr/bin/python3 --version`, or the interpreter you passed to the installer.
+      placeholder: "3.9.6"
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where it happens
+      options:
+        - Desktop widget
+        - Menu bar dropdown
+        - Background collection
+        - Install, update or uninstall
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant lines from refresh.log
+      description: "`~/Library/Application Support/Bars/logs/refresh.log` contains only fixed status lines, provider IDs and durations."
+      render: text
