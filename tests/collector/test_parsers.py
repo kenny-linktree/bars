@@ -48,6 +48,26 @@ class ParserTests(unittest.TestCase):
         value = parsers.codex({"rate_limit": {"primary_window": {"used_percent": 20}}})
         self.assertEqual(value["primary_metric_id"], "primary_window")
         self.assertEqual(value["metrics"][0]["used"], 20)
+        # Without a reported length, a window keeps its documented default.
+        self.assertEqual([m["period"] for m in value["metrics"]], [None])
+
+    def test_codex_windows_take_periods_from_reported_lengths(self):
+        value = parsers.codex({"rate_limit": {
+            "primary_window": {"used_percent": 100, "limit_window_seconds": 5 * 3_600,
+                               "reset_at": 1791011563},
+            "secondary_window": {"used_percent": 27, "limit_window_seconds": 7 * 86_400,
+                                 "reset_at": 1791580340}}})
+        by_id = {metric["id"]: metric for metric in value["metrics"]}
+        self.assertEqual(by_id["primary_window"]["period"], "five_hours")
+        self.assertEqual(by_id["primary_window"]["resets_at"], "2026-10-03T07:12:43Z")
+        self.assertEqual(by_id["secondary_window"]["period"], "week")
+        self.assertEqual(by_id["secondary_window"]["resets_at"], "2026-10-09T21:12:20Z")
+
+    def test_codex_unmappable_window_length_carries_no_period(self):
+        value = parsers.codex({"rate_limit": {
+            "primary_window": {"used_percent": 10, "limit_window_seconds": 3_600},
+            "secondary_window": {"used_percent": 10, "limit_window_seconds": "soon"}}})
+        self.assertEqual([m["period"] for m in value["metrics"]], [None, None])
 
     def test_subscription_priority_and_missing_windows(self):
         cases = (

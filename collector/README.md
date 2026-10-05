@@ -49,7 +49,7 @@ Claude's budget currency and exponent come from each money field. Its scope rema
 
 Devin's on-demand balance is a team balance in USD. The quota endpoint supplies no genuine total, used amount, or reset date for that balance. Its daily and weekly quotas remain percentages with unknown scope. Daily quota is omitted when the source sets `hide_daily_quota`. The parser does not estimate missing amounts, reset boundaries, or primary metrics from unrelated allowances.
 
-Each metric carries its documented allowance period (`five_hours`, `day`, `week`, `month`) when the source defines one: Claude's monthly budget, Codex's monthly credits and Cursor's billing-cycle allowances are monthly; Claude's 5-hour and weekly quotas, Codex's weekly quota and Devin's daily and weekly quotas use their names. Codex's session window carries no period because its length is not reported. The native reader derives pace from the period, the reset instant and the fetch time.
+Each metric carries its documented allowance period (`five_hours`, `day`, `week`, `month`) when the source defines one: Claude's monthly budget, Codex's monthly credits and Cursor's billing-cycle allowances are monthly; Claude's 5-hour and weekly quotas, Codex's weekly quota and Devin's daily and weekly quotas use their names. Codex's session and weekly windows take their periods from the response's reported window lengths (5 hours and 7 days). The native reader derives pace from the period, the reset instant and the fetch time.
 
 The worker contract is documented in [the snapshot contract](../docs/snapshot-contract.md). Publication into WidgetKit's readable storage is a separate native operation.
 
