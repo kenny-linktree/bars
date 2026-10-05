@@ -64,10 +64,18 @@ def codex(data):
                               budget.get("used"), budget.get("limit"), remaining, reset=budget.get("reset_at"),
                               period="month"))
     limits = obj(data.get("rate_limit"))
-    # The session window's length is not reported, so it carries no period.
-    for key, label, period in (("primary_window", "Session quota", None), ("secondary_window", "Weekly quota", "week")):
+    # The response reports each window's length in seconds. Documented lengths map
+    # to allowance periods. An absent field keeps each window's documented default;
+    # an unmappable or malformed length means no pace rather than a wrong one.
+    periods = {5 * 3_600: "five_hours", 7 * 86_400: "week"}
+    for key, label, fallback in (("primary_window", "Session quota", None),
+                                 ("secondary_window", "Weekly quota", "week")):
         quota = obj(limits.get(key))
         if quota.get("used_percent") is not None:
+            seconds = quota.get("limit_window_seconds")
+            period = fallback
+            if seconds is not None:
+                period = periods.get(seconds) if isinstance(seconds, int) and not isinstance(seconds, bool) else None
             metrics.append(metric(key, label, "quota", "individual", "%", quota["used_percent"], 100,
                                   reset=quota.get("reset_at"), period=period))
     return result("monthly_credits", metrics, alternatives=("primary_window", "secondary_window"))
