@@ -23,9 +23,15 @@ MainActor.assumeIsolated {
             preconditionFailure("Synthetic previews must not read a live snapshot")
         }
         precondition(reads == 0)
-        precondition(first.count == 9 && first.map(\.name) == Fixtures.syntheticNames)
+        precondition(first.count == 10 && first.map(\.name) == Fixtures.syntheticNames)
         let many = first.first { $0.name == "many" }!
         precondition(many.snapshot.providers.count == 8 && many.snapshot.visibleProviders.count == 8)
+        // The densest snapshot the contract allows: every provider selects 31 secondary allowances,
+        // and the widget's shared budget still shows at most six mini bars in total.
+        let dense = first.first { $0.name == "dense" }!
+        precondition(dense.snapshot.providers.allSatisfy { $0.secondaryMetricIds.count == 31 && $0.metrics.count == 32 })
+        let counts = dense.snapshot.providers.map { UsagePresentation.secondaryAllowances(for: $0, now: dense.now).count }
+        precondition(UsagePresentation.compactSecondaryAllocation(counts).reduce(0, +) == UsagePresentation.compactSecondaryBudget)
         precondition(first.map(\.now) == second.map(\.now))
         precondition(first.map(\.snapshot) == second.map(\.snapshot))
         let stale = first.first { $0.name == "stale" }!
@@ -35,7 +41,7 @@ MainActor.assumeIsolated {
             precondition(provider.primaryMetric?.kind == .quota)
             precondition(UsagePresentation.secondaryMetrics(for: provider).count == 1)
         }
-        print("PASS: nine synthetic fixtures, including subscriptions and eight providers, never read live data and ignore wall time")
+        print("PASS: ten synthetic fixtures, including subscriptions, eight providers and dense allowances, never read live data and ignore wall time")
 
         let supplied = Fixtures.baseline(now: Fixtures.fixedNow)
         let live = try Fixtures.make(["live"], wallNow: Fixtures.fixedNow, warn: { _ in }) {
