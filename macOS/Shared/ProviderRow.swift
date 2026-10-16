@@ -267,7 +267,7 @@ struct SecondaryAllowanceRow: View {
     let allowance: SecondaryAllowance
     var stale = false
     var compact = false
-    /// Further allowances the compact row leaves to details, named on this caption.
+    /// Further allowances the compact row leaves to details, counted beside this caption.
     var omitted = 0
 
     var body: some View {
@@ -277,6 +277,14 @@ struct SecondaryAllowanceRow: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .layoutPriority(1)
+                // The overflow count keeps its space; it is the descriptive caption that truncates.
+                if omitted > 0 {
+                    Text("· \(omitted) more in Bars")
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .layoutPriority(2)
+                }
                 Spacer(minLength: 0)
                 Text(allowance.value)
                     .monospacedDigit()
@@ -293,9 +301,8 @@ struct SecondaryAllowanceRow: View {
     private var caption: Text {
         let label = Text(allowance.label).foregroundStyle(.tertiary)
         let reset = allowance.reset.map { Text(" · \($0)").foregroundStyle(.tertiary) } ?? Text("")
-        let more = omitted > 0 ? Text(" · \(omitted) more in Bars").foregroundStyle(.tertiary) : Text("")
-        guard let note = allowance.note else { return Text("\(label)\(reset)\(more)") }
+        guard let note = allowance.note else { return Text("\(label)\(reset)") }
         let tag = Text(" · \(note.text)").fontWeight(.medium).foregroundStyle(BarsPalette.note(note))
-        return Text("\(label)\(reset)\(tag)\(more)")
+        return Text("\(label)\(reset)\(tag)")
     }
 }
