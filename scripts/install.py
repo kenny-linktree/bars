@@ -311,6 +311,15 @@ def source_commit() -> str | None:
     return commit if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", commit) else None
 
 
+def previous_config(config_path: Path) -> dict:
+    """An existing installation's settings object, or an empty one when there is none."""
+    try:
+        previous = json.loads(config_path.read_bytes())
+    except (OSError, ValueError):
+        return {}
+    return previous if isinstance(previous, dict) else {}
+
+
 def previous_disabled(config_path: Path) -> list[str] | None:
     """The `disabled_providers` list of an existing installation, or None when there is none."""
     try:
@@ -435,17 +444,14 @@ def install(app: Path, python: Path, *, start: bool = True,
               # and a person can see which code is installed without inspecting the clone.
               "layout_version": LAYOUT_VERSION, "installed_commit": source_commit()}
     detected = detect_logins(python, config["path"])
-    # The app also edits this list in place; refresh.py reads it on every run.
-    config["disabled_providers"] = choose_disabled(detected, disable, enable_all,
-                                                   previous=previous_disabled(config_path))
     launcher = f'#!/bin/sh\nexec {shlex.quote(str(python))} {shlex.quote(str(runtime / "refresh.py"))} "$@"\n'
     files = {
-        config_path: (json.dumps(config, indent=2).encode(), 0o600),
         refresh: (launcher.encode(), 0o700),
         plist_path: (plistlib.dumps(launch_agent(refresh, support)), 0o600),
     }
     kept_plugin_files: list[str] = []
     created_directories: list[Path] = []
+    written: list[Path] = []
     app_stage = Path(tempfile.mkdtemp(prefix=".bars-install-", dir=destination.parent))
     runtime_stage = Path(tempfile.mkdtemp(prefix=".install-", dir=support))
     may_remove_staging = True
@@ -470,11 +476,14 @@ def install(app: Path, python: Path, *, start: bool = True,
             # back with the other installed files. Plan them here, under the lock and just
             # before writing, so an edit made while the installer waited is still kept.
             plugin_files, kept_plugin_files = plan_plugin_sync(STANDARD_PLUGINS, plugins)
-            for directory in dict.fromkeys(path.parent for path in plugin_files):
-                if not directory.exists():
-                    created_directories.append(directory)
-                private_directory(directory)
             files.update(plugin_files)
+            # Settings are read here too: the app edits `disabled_providers` in place, and a
+            # provider hidden while the installer waited for the lock must stay hidden. Keys this
+            # installer does not know are carried over unchanged.
+            config = {**previous_config(config_path), **config}
+            config["disabled_providers"] = choose_disabled(detected, disable, enable_all,
+                                                           previous=previous_disabled(config_path))
+            files[config_path] = (json.dumps(config, indent=2).encode(), 0o600)
             previous_files = {path: ((path.read_bytes(), path.stat().st_mode & 0o777)
                                      if path.exists() else None) for path in files}
             was_loaded = subprocess.run(["/bin/launchctl", "print", service],
@@ -493,11 +502,16 @@ def install(app: Path, python: Path, *, start: bool = True,
                         live.rename(old)
                     switched.append((live, old))
                     new.rename(live)
+                for directory in dict.fromkeys(path.parent for path in plugin_files):
+                    if not directory.exists():
+                        created_directories.append(directory)
+                    private_directory(directory)
                 for path, (data, mode) in files.items():
                     # A plugin directory replaced by a link since planning would redirect the
                     # write into whatever it points at; refuse rather than follow it.
-                    if path.parent.is_symlink() or not is_private_directory(path.parent):
+                    if path in plugin_files and not is_private_directory(path.parent):
                         raise RuntimeError(f"{path.parent} changed during installation; nothing was written there.")
+                    written.append(path)
                     atomic_write(path, data, mode)
                 subprocess.run(["/usr/bin/plutil", "-lint", str(plist_path)], check=True)
                 register_app(destination)
@@ -510,7 +524,12 @@ def install(app: Path, python: Path, *, start: bool = True,
                         shutil.rmtree(live)
                     if old.exists():
                         old.rename(live)
-                for path, previous in previous_files.items():
+                # Restore only what this run wrote, and never through a plugin directory that
+                # became a link meanwhile: that would edit whatever the link points at.
+                for path in reversed(written):
+                    if path in plugin_files and not is_private_directory(path.parent):
+                        continue
+                    previous = previous_files[path]
                     if previous is None:
                         path.unlink(missing_ok=True)
                     else:

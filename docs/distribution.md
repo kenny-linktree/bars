@@ -43,7 +43,7 @@ A first install asks the checkout's standard plugins (`python3 -m bars_collector
 
 Running the install command again on a Mac with the first release (schema-1 snapshots, no plugins directory, a quarter-hour LaunchAgent) is the whole migration; nothing needs to be removed first.
 
-- `installation.json` is rewritten with every existing key kept. `disabled_providers` is preserved as it is; detection runs but is not applied to a reinstall. `plugins_path` is added.
+- `installation.json` is rewritten with every existing key kept, including keys this installer does not know. `disabled_providers` is read under the refresh lock just before writing, so a provider hidden from the dropdown while the installer waited stays hidden; detection runs but is not applied to a reinstall. `plugins_path`, `layout_version` and `installed_commit` are added.
 - `plugins/` is created and the four standard plugins written, with `.installed.json` recording their digests so later updates can tell an edited file from an unmodified one.
 - The LaunchAgent is booted out, rewritten to the per-minute schedule with `--scheduled`, and started again.
 - `snapshot.json` is left to the new collector, which reads the version 1 file, upgrades it in place and keeps every retained value, status, timestamp and enabled flag. The installer kickstarts a collection, so this happens within seconds.
@@ -51,7 +51,9 @@ Running the install command again on a Mac with the first release (schema-1 snap
 
 Keychain approvals, the source clone and provider logins are untouched. `tests/integration/test_refresh.py` exercises this path from a version 1 layout.
 
-Going back to the first release is not automatic: its collector refuses a version 2 `snapshot.json` as corrupt. To downgrade, uninstall with `--keep-data`, delete `snapshot.json` and `widget-snapshot.json`, then install the old commit (`BARS_REF`).
+Going back to the first release is not automatic: its collector refuses a version 2 `snapshot.json` as corrupt. To downgrade, uninstall with `--keep-data`, delete `snapshot.json` and `widget-snapshot.json`, then install the old release with `BARS_REF=v1` (a tag; `BARS_REF` accepts a branch or a tag, and a retained source clone follows either).
+
+The installer rolls back on any error it can observe: the app, runtime, launcher, LaunchAgent, settings and the plugin files it wrote are restored, and plugin directories it created are removed if still empty. It is not transactional against being killed mid-write (a power loss or `kill -9`): the previous app and runtime remain beside the new ones as `old.app` and `old-runtime` in the staging directories, but settings and plugin files already written stay written. Running the install command again completes the installation.
 
 ## Uninstall
 

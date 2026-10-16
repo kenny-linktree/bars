@@ -126,6 +126,27 @@ class BootstrapTests(unittest.TestCase):
         self.assertIn("--uninstall", output)
 
     @unittest.skipUnless(tools_available(), "Command Line Tools and git are required")
+    def test_retained_clone_follows_a_tag_or_a_branch(self):
+        # The documented downgrade is BARS_REF=v1, a tag; a retained clone must resolve it,
+        # and a later run must be able to return to the branch.
+        work, bare = self.make_repository()
+        self.assertEqual(self.run_bootstrap(BARS_REPO_URL=bare.as_uri()).returncode, 0)
+        git("tag", "v1", cwd=work)
+        git("push", "-q", str(bare), "v1", cwd=work)
+        (work / "scripts/install.py").write_text("MARKER = 2\n" + STUB_INSTALL)
+        git("commit", "-q", "-am", "update", cwd=work)
+        git("push", "-q", str(bare), "HEAD:main", cwd=work)
+        result = self.run_bootstrap(BARS_REPO_URL=bare.as_uri(), BARS_REF="v1")
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(self.record()["marker"], 1)
+        result = self.run_bootstrap(BARS_REPO_URL=bare.as_uri())
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(self.record()["marker"], 2)
+        result = self.run_bootstrap(BARS_REPO_URL=bare.as_uri(), BARS_REF="v9")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("v9 is not a branch or tag", result.stderr.decode())
+
+    @unittest.skipUnless(tools_available(), "Command Line Tools and git are required")
     def test_rerun_fast_forwards_and_discards_local_changes(self):
         work, bare = self.make_repository()
         self.assertEqual(self.run_bootstrap(BARS_REPO_URL=bare.as_uri()).returncode, 0)

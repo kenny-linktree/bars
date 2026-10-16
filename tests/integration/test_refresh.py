@@ -1041,6 +1041,67 @@ class InstallationTransactionTests(unittest.TestCase):
         self.assertEqual(json.loads((plugins / installer.PLUGIN_RECORD).read_text()),
                          {"claude/plugin.py": installer.file_digest(b"previous")})
 
+    def test_rollback_never_writes_through_a_plugin_directory_that_became_a_link(self):
+        plugins = self.support / "plugins"
+        elsewhere = Path(self.temporary.name) / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "plugin.py").write_text("# unrelated module\n")
+        (elsewhere / "plugin.json").write_text("{}")
+        real_private = installer.private_directory
+
+        def swap_after_creation(path):
+            # The directory is prepared, then replaced by a link before the writes.
+            real_private(path)
+            if path.name == "codex":
+                shutil.rmtree(path)
+                path.symlink_to(elsewhere)
+        with patch.object(installer, "private_directory", swap_after_creation), \
+                self.assertRaisesRegex(RuntimeError, "changed during installation"):
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        self.assert_old_installation()
+        # Neither the refused write nor the rollback touched the link's target.
+        self.assertEqual((elsewhere / "plugin.py").read_text(), "# unrelated module\n")
+        self.assertEqual((elsewhere / "plugin.json").read_text(), "{}")
+        # Files written before the refusal were rolled back; the link itself is left alone.
+        self.assertFalse((plugins / "claude").exists())
+        self.assertTrue((plugins / "codex").is_symlink())
+
+    def test_settings_changed_while_the_installer_waits_are_kept(self):
+        # The app edits disabled_providers in place; a change made while an earlier refresh
+        # held the lock must survive, and keys this installer does not know are carried over.
+        config_path = self.support / "installation.json"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        real_lock = installer.refresh_lock
+
+        @contextlib.contextmanager
+        def editing_lock(support, timeout=installer.REFRESH_LOCK_WAIT_SECONDS):
+            with real_lock(support, timeout):
+                config = json.loads(config_path.read_text())
+                config["disabled_providers"] = ["cursor"]
+                config["future_key"] = {"kept": True}
+                config_path.write_text(json.dumps(config))
+                yield
+        with patch.object(installer, "refresh_lock", editing_lock), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        config = json.loads(config_path.read_text())
+        self.assertEqual(config["disabled_providers"], ["cursor"])
+        self.assertEqual(config["future_key"], {"kept": True})
+        self.assertEqual(config["layout_version"], installer.LAYOUT_VERSION)
+
+    def test_failure_before_the_swap_creates_no_plugin_directories(self):
+        def fake_run(args, **kwargs):
+            if args[:2] == ["/bin/launchctl", "bootout"]:
+                raise subprocess.CalledProcessError(1, args)
+            return subprocess.CompletedProcess(args, 0)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_install(fake_run)
+        self.assert_old_installation()
+        # The layout's plugins directory is harmless when empty; a per-plugin directory
+        # without files would read as a broken provider.
+        self.assertEqual(list((self.support / "plugins").iterdir()), [])
+
     def test_updating_a_version_one_installation_keeps_selection_and_retained_values(self):
         # The layout the first release left behind: no plugins directory, no plugins_path,
         # a quarter-hour LaunchAgent and a schema-1 snapshot with retained values.

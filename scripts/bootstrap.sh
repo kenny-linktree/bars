@@ -155,9 +155,17 @@ fetch_source() {
   if [ -d "$SRC/.git" ] && [ ! -L "$SRC" ] && [ ! -L "$SRC/.git" ]; then
     say "Updating the Bars source in $SRC ($REF)..."
     src_git remote set-url origin "$REPO_URL"
-    src_git fetch --quiet --prune origin
-    src_git checkout --quiet --force -B "$REF" "origin/$REF"
-    src_git reset --quiet --hard "origin/$REF"
+    src_git fetch --quiet --prune --tags origin
+    # BARS_REF may name a branch or a tag (the documented downgrade uses the v1 tag).
+    if src_git rev-parse --quiet --verify "refs/remotes/origin/$REF^{commit}" >/dev/null; then
+      src_git checkout --quiet --force -B "$REF" "origin/$REF"
+      src_git reset --quiet --hard "origin/$REF"
+    elif src_git rev-parse --quiet --verify "refs/tags/$REF^{commit}" >/dev/null; then
+      src_git checkout --quiet --force --detach "refs/tags/$REF"
+      src_git reset --quiet --hard "refs/tags/$REF"
+    else
+      fail "$REF is not a branch or tag of $REPO_URL."
+    fi
   elif [ -e "$SRC" ] || [ -L "$SRC" ]; then
     fail "$SRC exists but is not a Git checkout. Move it aside, then run this again."
   else
