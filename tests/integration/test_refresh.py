@@ -1096,6 +1096,25 @@ class InstallationTransactionTests(unittest.TestCase):
         self.assertEqual((self.destination / "Contents/MacOS/Bars").read_text(), "old")
         self.assertEqual((self.support / "installation.json").read_text(), "old config")
 
+    def test_process_start_failures_after_the_swap_are_warnings(self):
+        # Once the files are in place, a process that cannot be started (an OSError from
+        # pgrep, open or kickstart, not just a nonzero exit) must not fail the installation.
+        for failing in ("/usr/bin/pgrep", "/usr/bin/open", "kickstart"):
+            with self.subTest(failing=failing):
+                self.setUp()
+                detecting = self.detecting_run({pid: True for pid in installer.standard_plugin_ids()})
+
+                def fake_run(args, **kwargs):
+                    swapped = (self.destination / "Contents/MacOS/Bars").read_text() == "new"
+                    if failing in args[:2] and swapped:
+                        raise OSError(35, "Resource temporarily unavailable")
+                    return detecting(args, **kwargs)
+                with contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(io.StringIO()) as stderr:
+                    self.run_install(fake_run)
+                self.assertIn("Installed", stdout.getvalue())
+                self.assertEqual((self.destination / "Contents/MacOS/Bars").read_text(), "new")
+                self.assertIn("could not be", stderr.getvalue() + stdout.getvalue())
+
     def test_settings_changed_while_the_installer_waits_are_kept(self):
         # The app edits disabled_providers in place; a change made while an earlier refresh
         # held the lock must survive, and keys this installer does not know are carried over.

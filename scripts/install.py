@@ -548,14 +548,24 @@ def install(app: Path, python: Path, *, start: bool = True,
                 may_remove_staging = True
                 raise
             may_remove_staging = True
-            # The files are in place. Processes still running the previous code are replaced
-            # while the refresh lock is held, so no publication races the restart.
-            warnings = restart_user_interfaces(destination, executable,
-                                               relaunch_app=start or app_was_running)
-        # RunAtLoad may have fired while installation held the refresh lock. Everything is
-        # installed by now, so a failed kick is a warning, not a failed installation.
-        if start and subprocess.run(["/bin/launchctl", "kickstart", service], check=False, **quiet).returncode:
-            warnings.append("The first collection could not be started; it runs at the next minute or on Refresh now.")
+            # The files are in place: from here on a failure to restart or start a process is a
+            # warning, never a failed installation, however it surfaces.
+            warnings = []
+            try:
+                # Processes still running the previous code are replaced while the refresh
+                # lock is held, so no publication races the restart.
+                warnings = restart_user_interfaces(destination, executable,
+                                                   relaunch_app=start or app_was_running)
+            except (OSError, subprocess.SubprocessError):
+                warnings.append("The widget and menu bar app could not be restarted; log out and in, or open Bars, to finish.")
+        # RunAtLoad may have fired while installation held the refresh lock.
+        if start:
+            try:
+                started = subprocess.run(["/bin/launchctl", "kickstart", service], check=False, **quiet).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                started = False
+            if not started:
+                warnings.append("The first collection could not be started; it runs at the next minute or on Refresh now.")
     finally:
         # If rollback itself fails, retain backup directories for recovery.
         if may_remove_staging:
