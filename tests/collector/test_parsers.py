@@ -55,7 +55,7 @@ class ParserTests(unittest.TestCase):
         value = parse_devin({"overage_balance": 0, "daily_percentage": 1, "weekly_percentage": 1})
         self.assertEqual(value["secondary_metric_ids"], ["daily", "on_demand"])
         self.assertEqual(value["metrics"][-1]["note"], plugin("devin").BALANCE_NOTE)
-        self.assertIsNone(value["metrics"][1]["note"])
+        self.assertIsNone(value["metrics"][0]["note"])
 
     def test_claude_missing_used_is_not_zero(self):
         metric = parse_claude({"spend": {"limit": {
@@ -174,7 +174,7 @@ class ParserTests(unittest.TestCase):
                              "overage_balance": -2.5, "daily_percentage": 0, "weekly_percentage": 120,
                              "daily_reset_at": "2026-10-02T00:00:00Z", "weekly_reset_at": None,
                              "hide_daily_quota": False})
-        weekly, daily, credits = value["metrics"]
+        daily, weekly, credits = value["metrics"]
         self.assertEqual(value["primary_metric_id"], "weekly")
         self.assertEqual(value["secondary_metric_ids"], ["daily", "on_demand"])
         self.assertEqual(weekly["used"], 120)
@@ -232,7 +232,7 @@ class ParserTests(unittest.TestCase):
         cursor = parse_cursor({"individualUsage": {"plan": {"used": 1}, "onDemand": {"used": 1}}})
         self.assertEqual([m["period"] for m in cursor["metrics"]], ["month", "month"])
         devin = parse_devin({"overage_balance": 0, "daily_percentage": 1, "weekly_percentage": 1})
-        self.assertEqual([m["period"] for m in devin["metrics"]], ["week", "day", None])
+        self.assertEqual([m["period"] for m in devin["metrics"]], ["day", "week", None])
 
     def test_invalid_source_reset_is_not_silently_lost(self):
         with self.assertRaises(CollectionError):

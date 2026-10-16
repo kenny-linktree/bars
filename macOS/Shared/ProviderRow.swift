@@ -222,34 +222,22 @@ struct ProviderRow: View {
         .minimumScaleFactor(0.8)
     }
 
-    @ViewBuilder private func paceAndContext(_ metric: UsageMetric, pace: UsagePace?) -> some View {
-        let paceLine = pace.flatMap { pace in
-            metric.allowancePeriod.map { period in
+    /// One status line under every bar, the same in the widget and the dropdown: pace on the
+    /// left when the allowance has a period, and the reset (or why there is none) on the right.
+    /// A fixed shape keeps rows the same height whether or not a provider reports pace.
+    private func paceAndContext(_ metric: UsageMetric, pace: UsagePace?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            if let pace, let period = metric.allowancePeriod {
                 Text(UsagePresentation.paceCaption(for: pace, period: period))
                     .foregroundStyle(BarsPalette.paceText(for: pace))
+                    .layoutPriority(2)
             }
+            Spacer(minLength: 0)
+            context(metric).layoutPriority(1)
         }
-        if compact, let paceLine {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                paceLine.layoutPriority(2)
-                Spacer(minLength: 0)
-                context(metric).layoutPriority(1)
-            }
-            .font(.system(size: captionSize))
-            .lineLimit(1)
-            .minimumScaleFactor(0.8)
-        } else {
-            if let paceLine {
-                paceLine
-                    .font(.system(size: captionSize))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-            context(metric)
-                .font(.system(size: captionSize))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
+        .font(.system(size: captionSize))
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
     }
 
     /// Reset text, or why there is none, followed by previous-period or overage warnings.

@@ -65,7 +65,8 @@ def on_demand(data, my_usage):
 def parse(data, my_usage=None):
     data = obj(data)
     metrics = []
-    for period in ("weekly", "daily"):
+    # Metrics in period order, shortest first; the weekly quota still leads the overview.
+    for period in ("daily", "weekly"):
         if period == "daily" and data.get("hide_daily_quota") is True:
             continue
         used = data.get(period + "_percentage")

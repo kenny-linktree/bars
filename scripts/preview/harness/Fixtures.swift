@@ -290,10 +290,10 @@ enum Fixtures {
                        used: 75, limit: 3_000, resetsAt: cursorReset, period: .month),
             ]),
             provider(.devin, "Devin", primary: "weekly", secondary: ["daily", "on_demand"], [
-                metric("weekly", "Weekly quota", .quota, .unknown, "%",
-                       used: 45, limit: 100, resetsAt: devinWeekly, period: .week),
                 metric("daily", "Daily quota", .quota, .unknown, "%",
                        used: 20, limit: 100, resetsAt: devinDaily, period: .day),
+                metric("weekly", "Weekly quota", .quota, .unknown, "%",
+                       used: 45, limit: 100, resetsAt: devinWeekly, period: .week),
                 metric("on_demand", "On-demand credits", .budget, .team, "USD",
                        used: 137.5, limit: 2_637.5, remaining: 2_500, resetsAt: monthStart, period: .month,
                        note: "Used is your draw this cycle; left is what remains in the shared team pool. The bar compares the two, since Devin does not report the pool total."),
