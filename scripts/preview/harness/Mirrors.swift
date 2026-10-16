@@ -44,6 +44,7 @@ struct OverviewMirror: View {
                      : "Every provider is hidden. Show one below to see its usage.")
                     .foregroundStyle(.secondary)
             }
+            Divider()
             VStack(alignment: .leading, spacing: 8) {
                 HiddenProvidersLine(snapshot: snapshot) { _ in }
                 HStack(alignment: .firstTextBaseline, spacing: 12) {

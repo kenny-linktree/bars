@@ -200,6 +200,7 @@ struct BarsDropdown: View {
                              : "Every provider is hidden. Show one below to see its usage.")
                             .foregroundStyle(.secondary)
                     }
+                    Divider()
                     VStack(alignment: .leading, spacing: 8) {
                         HiddenProvidersLine(snapshot: model.snapshot) { model.setHidden(false, provider: $0) }
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
