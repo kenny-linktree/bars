@@ -350,6 +350,15 @@ enum UsagePresentation {
         provider.secondaryMetrics
     }
 
+    /// Mini bars a compact row shows at most. A plugin may select up to 31, which no widget
+    /// can hold; the rest remain in details, where every metric appears.
+    static let compactSecondaryLimit = 3
+
+    /// The secondary allowances a compact row shows, and how many it leaves to details.
+    static func compactSecondaryAllowances(_ allowances: [SecondaryAllowance]) -> (shown: [SecondaryAllowance], omitted: Int) {
+        (Array(allowances.prefix(compactSecondaryLimit)), max(0, allowances.count - compactSecondaryLimit))
+    }
+
     static func secondaryAllowances(for provider: ProviderSnapshot, now: Date, locale: Locale = .current,
                                     timeZone: TimeZone = .current) -> [SecondaryAllowance] {
         let primaryReset = provider.primaryMetric.flatMap { resetDate(for: $0, provider: provider) }

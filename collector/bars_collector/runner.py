@@ -20,7 +20,7 @@ from bars_plugin.access import child_environment
 from bars_plugin.values import MAX_TEXT
 
 from .model import MAX_SNAPSHOT_BYTES, CollectionError, apply_enabled, encoded_size, now, reconcile, validate_result
-from .storage import load_snapshot, write_snapshot, writer_lock
+from .storage import SnapshotTooLarge, load_snapshot, write_snapshot, writer_lock
 
 # A valid result is a few kilobytes; anything near this is a plugin fault.
 MAX_RESULT_BYTES = 256 * 1024
@@ -249,8 +249,8 @@ def apply_result(snapshot, pid, value):
         validate_result(value)
     except (ValueError, CollectionError, KeyError, TypeError):
         value = dict(status="error", message=INVALID_MESSAGE, last_attempt_at=now())
+    retained = dict(previous)
     if value["status"] == "ok":
-        retained = dict(previous)
         previous.update(value)
         # Every reader refuses a snapshot over the size bound, so a result that would push
         # the whole file past it is refused instead, keeping the file readable.
@@ -261,6 +261,10 @@ def apply_result(snapshot, pid, value):
     if value["status"] != "ok":
         # A failed attempt cannot replace the last successful period or timestamp.
         previous.update({k: value[k] for k in ("status", "message", "last_attempt_at")})
+        # Nor may its message be the bytes that push the file past the bound.
+        if encoded_size(snapshot) > MAX_SNAPSHOT_BYTES:
+            previous.clear()
+            previous.update(retained)
     snapshot["generated_at"] = now()
 
 
@@ -286,7 +290,13 @@ def run(output, selected, timeout=DEFAULT_TIMEOUT, results=None, disabled=(), pl
         changed = reconcile(snapshot, plugins) or changed
         if apply_enabled(snapshot, disabled) or changed:
             snapshot["generated_at"] = now()
-            write_snapshot(output, snapshot)
+            # Too many plugins for one file is the one change that cannot be trimmed to fit;
+            # the previous readable snapshot stays, and the scheduler log says why.
+            try:
+                write_snapshot(output, snapshot)
+            except SnapshotTooLarge as error:
+                raise RuntimeError("Installed plugins exceed the snapshot size bound; remove some. "
+                                   "The previous snapshot was kept.") from error
         if not selected:
             return snapshot
         for pid in [pid for pid in selected if not by_id[pid].loadable]:

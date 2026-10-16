@@ -8,7 +8,7 @@ from pathlib import Path
 import stat
 import tempfile
 
-from .model import SCHEMA_VERSION, now, upgrade_snapshot, validate_snapshot
+from .model import MAX_SNAPSHOT_BYTES, SCHEMA_VERSION, encoded_size, now, upgrade_snapshot, validate_snapshot
 
 
 class AlreadyRunning(Exception):
@@ -53,8 +53,16 @@ def empty_snapshot():
     return dict(schema_version=SCHEMA_VERSION, generated_at=now(), providers=[])
 
 
+class SnapshotTooLarge(ValueError):
+    """The snapshot would exceed the bound every reader enforces; nothing was written."""
+
+
 def write_snapshot(output, snapshot):
     validate_snapshot(snapshot)
+    # The last line of defense: whatever produced it, a file over the bound is unreadable
+    # to every reader, so it is never the one that replaces a readable file.
+    if encoded_size(snapshot) > MAX_SNAPSHOT_BYTES:
+        raise SnapshotTooLarge("Snapshot too large.")
     output = Path(output)
     descriptor, temporary = tempfile.mkstemp(prefix="." + output.name + ".", dir=output.parent)
     try:

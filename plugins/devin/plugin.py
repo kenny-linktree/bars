@@ -5,13 +5,12 @@ daily and weekly quotas as percentages. `billing/quota/my-on-demand-usage` repor
 person drew from that shared balance in the current cycle, with the cycle's bounds.
 """
 
-from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import re
 import shutil
 
-from bars_plugin import CollectionError, command, http_json, login_found, metric, read_toml, result, timestamp, token
+from bars_plugin import CollectionError, command, http_json, login_found, metric, read_toml, result, token
 
 MISSING = "Devin login was not found. Run devin auth login."
 UNREADABLE = "Devin login could not be read. Run devin auth login."
@@ -21,8 +20,6 @@ ON_DEMAND_NOTE = ("Used is your draw this cycle; left is what remains in the sha
                   "since Devin does not report the pool total.")
 QUOTA_URL = "https://app.devin.ai/api/%s/billing/quota/usage"
 MY_USAGE_URL = "https://app.devin.ai/api/%s/billing/quota/my-on-demand-usage"
-# A reported cycle of about this many days maps to the contract's named period lengths.
-PERIOD_DAYS = ((1, "day"), (7, "week"), (30, "month"))
 
 
 def obj(value):
@@ -33,33 +30,23 @@ def obj(value):
     return value
 
 
-def cycle_period(start, end):
-    """The named period length a reported cycle corresponds to, or None when it matches none."""
-    if start is None or end is None:
-        return None
-    days = (datetime.fromisoformat(timestamp(end).replace("Z", "+00:00"))
-            - datetime.fromisoformat(timestamp(start).replace("Z", "+00:00"))) / timedelta(days=1)
-    for length, name in PERIOD_DAYS:
-        if abs(days - length) <= (2 if length == 30 else 0.05):
-            return name
-    return None
-
-
 def on_demand(data, my_usage):
     """One bar for the shared on-demand credits: this person's draw in the current cycle against
     that draw plus what remains in the shared pool. Devin reports those two amounts and no pool
-    total, so the limit is their sum and the note says so. None when neither is reported."""
+    total, so the limit is their sum and the note says so. The bar carries no period: the cycle
+    is this person's, not the pool's, so no pace is computed against the derived limit. A pool
+    in overdraft, or a missing personal figure, falls back to a remaining-only balance. None when
+    neither amount is reported."""
     balance = obj(data).get("overage_balance")
     mine = obj(my_usage)
     used = mine.get("amount")
     if balance is None and used is None:
         return None
-    end = mine.get("cycle_end")
-    if used is None:
+    if used is None or (balance is not None and balance < 0):
         return metric("on_demand", "On-demand credits", "balance", "team", "USD", remaining=balance, note=BALANCE_NOTE)
     limit = None if balance is None else float(used) + float(balance)
     return metric("on_demand", "On-demand credits", "budget", "team", "USD", used, limit, balance,
-                  reset=end, period=cycle_period(mine.get("cycle_start"), end), note=ON_DEMAND_NOTE)
+                  reset=mine.get("cycle_end"), note=ON_DEMAND_NOTE)
 
 
 def parse(data, my_usage=None):

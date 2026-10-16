@@ -193,18 +193,22 @@ class ParserTests(unittest.TestCase):
         value = parse_devin({"overage_balance": 10, "weekly_percentage": 5},
                             {"amount": 12.5, "cycle_start": "2026-10-01T00:00:00Z", "cycle_end": "2026-11-01T00:00:00Z"})
         credits = next(m for m in value["metrics"] if m["id"] == "on_demand")
-        self.assertEqual((credits["kind"], credits["scope"], credits["unit"], credits["period"]),
-                         ("budget", "team", "USD", "month"))
+        self.assertEqual((credits["kind"], credits["scope"], credits["unit"]), ("budget", "team", "USD"))
         # used is this person's draw, remaining the pool's balance, and the limit their sum: never a pool total.
         self.assertEqual((credits["used"], credits["remaining"], credits["limit"]), (12.5, 10, 22.5))
         self.assertEqual(credits["resets_at"], "2026-11-01T00:00:00Z")
+        # No period: the cycle is personal and the limit derived, so the readers compute no pace.
+        self.assertIsNone(credits["period"])
         self.assertEqual(credits["note"], plugin("devin").ON_DEMAND_NOTE)
         # A draw without a balance has no bar; neither figure means no credits metric at all.
         alone = next(m for m in parse_devin({"weekly_percentage": 5}, {"amount": 3})["metrics"] if m["id"] == "on_demand")
         self.assertEqual((alone["used"], alone["limit"], alone["remaining"]), (3, None, None))
         self.assertEqual([m["id"] for m in parse_devin({"weekly_percentage": 5}, {"cycle_end": "x"})["metrics"]], ["weekly"])
-        self.assertEqual(plugin("devin").cycle_period("2026-10-01T00:00:00Z", "2026-10-08T00:00:00Z"), "week")
-        self.assertIsNone(plugin("devin").cycle_period("2026-10-01T00:00:00Z", "2026-10-13T00:00:00Z"))
+        # An overdrawn pool stays a balance (a budget cannot have negative remaining), so the
+        # quotas still update; the overdraft shows as a negative amount left.
+        overdrawn = parse_devin({"weekly_percentage": 5, "overage_balance": -2.5}, {"amount": 12.5})
+        credits = next(m for m in overdrawn["metrics"] if m["id"] == "on_demand")
+        self.assertEqual((credits["kind"], credits["used"], credits["limit"], credits["remaining"]), ("balance", None, None, -2.5))
         with self.assertRaises(CollectionError):
             parse_devin({"overage_balance": 10}, {"amount": -1})
 

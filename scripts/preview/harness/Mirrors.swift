@@ -38,6 +38,7 @@ struct OverviewMirror: View {
                     .buttonStyle(.plain)
                 if provider.id != visible.last?.id { Divider() }
             }
+            // `messages` stands for `model.storageError` only; the harness has no refresh or settings errors.
             if visible.isEmpty, messages.isEmpty || !snapshot.providers.isEmpty {
                 Text(snapshot.providers.isEmpty
                      ? "No provider plugins are installed. Reinstall Bars or add a plugin, then refresh."

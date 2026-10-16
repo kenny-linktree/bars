@@ -267,6 +267,54 @@ class RunTests(unittest.TestCase):
                             for p in refused))
         load_snapshot(self.output)  # Still readable.
 
+    def test_too_many_plugins_keep_the_previous_readable_snapshot(self):
+        # Manifests alone can exceed the bound: a plain reconciliation must then fail loudly
+        # and leave the last readable file in place rather than publish an unreadable one.
+        write_plugin(self.plugins_dir, "small", module=OK_PLUGIN)
+        before = self.run_all()
+        from bars_collector.plugins import MAX_NAME, MAX_TEXT
+        setup = {"install_title": "I" * MAX_TEXT, "install_url": "https://example.com/" + "p" * (MAX_TEXT - 20),
+                 "login_command": "c" * MAX_TEXT, "login_step": "s" * MAX_TEXT, "sign_in_again": "a" * MAX_TEXT,
+                 "credential_note": "n" * MAX_TEXT}
+        for index in range(900):
+            write_plugin(self.plugins_dir, "p%03d" % index, module=OK_PLUGIN,
+                         manifest={"manifest_version": 1, "id": "p%03d" % index, "name": "N" * MAX_NAME,
+                                   "usage_url": "https://example.com/" + "u" * (MAX_TEXT - 20), "setup": setup})
+        self.assertTrue(all(p.loadable for p in plugins.discover(self.plugins_dir)))
+        with self.assertRaisesRegex(RuntimeError, "exceed the snapshot size bound"):
+            self.run_all()
+        after = load_snapshot(self.output)
+        self.assertEqual([p["id"] for p in after["providers"]], [p["id"] for p in before["providers"]])
+
+    def test_a_failure_message_cannot_push_the_snapshot_past_the_bound(self):
+        from bars_collector.model import MAX_SNAPSHOT_BYTES, encoded_size
+        from bars_collector.runner import apply_result
+        snapshot = dict(schema_version=2, generated_at="2026-10-01T00:00:00Z", providers=[])
+        for index in range(80):
+            provider = dict(id="p%03d" % index, name="N" * 200, enabled=True, status="ok", message=None,
+                            fetched_at="2026-10-01T00:00:00Z", last_attempt_at="2026-10-01T00:00:00Z",
+                            primary_metric_id="m0", secondary_metric_ids=[], usage_url=None, setup=None,
+                            metrics=[dict(id="m%d" % i, label="L" * 200, kind="quota", scope="individual", unit="U" * 200,
+                                          used=1, limit=100, remaining=99, resets_at=None, resets_at_estimated=False,
+                                          period=None, note="N" * 200) for i in range(14)])
+            snapshot["providers"].append(provider)
+        # Fill the remaining room with small providers until fewer than 300 bytes are left.
+        index = 400
+        while MAX_SNAPSHOT_BYTES - encoded_size(snapshot) >= 300:
+            slack = MAX_SNAPSHOT_BYTES - encoded_size(snapshot)
+            snapshot["providers"].append(dict(id="q%03d" % index, name="n" * min(200, max(1, slack - 300)), enabled=True,
+                                              status="setup", message=None, fetched_at=None, last_attempt_at=None,
+                                              primary_metric_id=None, secondary_metric_ids=[], usage_url=None,
+                                              setup=None, metrics=[]))
+            index += 1
+        slack = MAX_SNAPSHOT_BYTES - encoded_size(snapshot)
+        self.assertTrue(0 <= slack < 300, slack)
+        target = snapshot["providers"][0]
+        retained = dict(target)
+        apply_result(snapshot, target["id"], dict(status="error", message="E" * 190, last_attempt_at="2026-10-02T00:00:00Z"))
+        self.assertLessEqual(encoded_size(snapshot), MAX_SNAPSHOT_BYTES)
+        self.assertEqual(target, retained)
+
     def test_results_touch_only_their_provider_entry(self):
         write_plugin(self.plugins_dir, "alpha", module=OK_PLUGIN)
         write_plugin(self.plugins_dir, "beta", module=OK_PLUGIN)

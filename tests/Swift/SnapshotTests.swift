@@ -70,7 +70,8 @@ func XCTAssertThrowsError<T>(_ value: @autoclosure () throws -> T, file: StaticS
         tests.testBarAccessibilityValueRoundsLikeVisibleText()
         tests.testDeepLinkRoundTripsAndRejectsOtherPaths()
         try tests.testMissingFileIsDistinguishedFromOtherReadFailures()
-        print("38 BarsCore checks passed")
+        tests.testCompactRowsCapSecondaryAllowances()
+        print("39 BarsCore checks passed")
     }
 }
 #endif
@@ -1077,6 +1078,21 @@ final class SnapshotTests: XCTestCase {
         XCTAssertNil(ProviderID(rawValue: ""))
         XCTAssertNil(ProviderID(rawValue: String(repeating: "a", count: 33)))
         XCTAssertEqual(ProviderID(rawValue: String(repeating: "a", count: 32))?.rawValue.count, 32)
+    }
+
+    func testCompactRowsCapSecondaryAllowances() {
+        // A plugin may select up to 31 mini bars; a compact row shows a few and counts the rest.
+        let many = (0..<31).map { index in
+            SecondaryAllowance(metric: UsageMetric(id: "m\(index)", label: "Allowance \(index)", kind: .quota, scope: .unknown,
+                                                   unit: "%", used: 1, limit: 100, remaining: 99, resetsAt: nil),
+                               value: "1%", reset: nil, note: nil, pace: nil)
+        }
+        let capped = UsagePresentation.compactSecondaryAllowances(many)
+        XCTAssertEqual(capped.shown.map(\.id), ["m0", "m1", "m2"])
+        XCTAssertEqual(capped.omitted, 28)
+        let few = UsagePresentation.compactSecondaryAllowances(Array(many.prefix(2)))
+        XCTAssertEqual(few.shown.count, 2)
+        XCTAssertEqual(few.omitted, 0)
     }
 
     func testMissingFileIsDistinguishedFromOtherReadFailures() throws {

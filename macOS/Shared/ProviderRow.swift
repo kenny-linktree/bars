@@ -103,9 +103,17 @@ struct ProviderRow: View {
                         .padding(.vertical, compact ? 1 : 2)
                 }
                 paceAndContext(metric, pace: pace)
-                ForEach(UsagePresentation.secondaryAllowances(for: provider, now: now)) { allowance in
+                let allowances = UsagePresentation.secondaryAllowances(for: provider, now: now)
+                let shown = compact ? UsagePresentation.compactSecondaryAllowances(allowances) : (shown: allowances, omitted: 0)
+                ForEach(shown.shown) { allowance in
                     SecondaryAllowanceRow(allowance: allowance, stale: provider.isStale(at: now), compact: compact)
                         .padding(.top, compact ? 0 : 2)
+                }
+                if shown.omitted > 0 {
+                    Text("\(shown.omitted) more in Bars")
+                        .font(.system(size: captionSize))
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             } else if UsagePresentation.isNotSetUp(provider) {
                 notSetUp
