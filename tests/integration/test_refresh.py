@@ -338,6 +338,16 @@ pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps({'s
         self.assertEqual((self.directory / "snapshot.json").read_text(), old)
         self.assertFalse((self.directory / "published.jsonl").exists())
 
+    def test_snapshot_size_exit_status_is_explained_in_the_log(self):
+        # The collector's stderr is never forwarded; a dedicated status carries the one
+        # condition a person has to act on (too many plugins for one snapshot file).
+        self.script("raise SystemExit(%d)" % refresh.SNAPSHOT_TOO_LARGE_STATUS)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 1)
+        log = (self.directory / "logs/refresh.log").read_text()
+        self.assertIn("exceed the snapshot size bound", log)
+        self.assertIn("Remove some plugins", log)
+
     def test_uses_installed_cli_path_without_interactive_shell_environment(self):
         cli_directory = self.directory / "cli"
         cli_directory.mkdir()

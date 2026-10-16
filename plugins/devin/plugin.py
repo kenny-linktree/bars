@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import shutil
 
-from bars_plugin import CollectionError, command, http_json, login_found, metric, read_toml, result, token
+from bars_plugin import CollectionError, command, http_json, login_found, metric, number, read_toml, result, token
 
 MISSING = "Devin login was not found. Run devin auth login."
 UNREADABLE = "Devin login could not be read. Run devin auth login."
@@ -37,7 +37,7 @@ def on_demand(data, my_usage):
     is this person's, not the pool's, so no pace is computed against the derived limit. A pool
     in overdraft, or a missing personal figure, falls back to a remaining-only balance. None when
     neither amount is reported."""
-    balance = obj(data).get("overage_balance")
+    balance = number(obj(data).get("overage_balance"), negative=True)
     mine = obj(my_usage)
     used = mine.get("amount")
     if balance is None and used is None:

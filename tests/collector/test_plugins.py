@@ -281,7 +281,8 @@ class RunTests(unittest.TestCase):
                          manifest={"manifest_version": 1, "id": "p%03d" % index, "name": "N" * MAX_NAME,
                                    "usage_url": "https://example.com/" + "u" * (MAX_TEXT - 20), "setup": setup})
         self.assertTrue(all(p.loadable for p in plugins.discover(self.plugins_dir)))
-        with self.assertRaisesRegex(RuntimeError, "exceed the snapshot size bound"):
+        from bars_collector.storage import SnapshotTooLarge
+        with self.assertRaises(SnapshotTooLarge):
             self.run_all()
         after = load_snapshot(self.output)
         self.assertEqual([p["id"] for p in after["providers"]], [p["id"] for p in before["providers"]])

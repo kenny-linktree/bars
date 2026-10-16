@@ -209,8 +209,15 @@ class ParserTests(unittest.TestCase):
         overdrawn = parse_devin({"weekly_percentage": 5, "overage_balance": -2.5}, {"amount": 12.5})
         credits = next(m for m in overdrawn["metrics"] if m["id"] == "on_demand")
         self.assertEqual((credits["kind"], credits["used"], credits["limit"], credits["remaining"]), ("balance", None, None, -2.5))
+        # Numeric strings, which the balance accepts elsewhere, still compare and sum as numbers.
+        text = next(m for m in parse_devin({"overage_balance": "10"}, {"amount": "2.5"})["metrics"] if m["id"] == "on_demand")
+        self.assertEqual((text["kind"], text["used"], text["limit"], text["remaining"]), ("budget", 2.5, 12.5, 10))
+        text = next(m for m in parse_devin({"overage_balance": "-1"}, {"amount": 2})["metrics"] if m["id"] == "on_demand")
+        self.assertEqual((text["kind"], text["remaining"]), ("balance", -1))
         with self.assertRaises(CollectionError):
             parse_devin({"overage_balance": 10}, {"amount": -1})
+        with self.assertRaises(CollectionError):
+            parse_devin({"overage_balance": "lots"}, {"amount": 1})
 
     def test_devin_hidden_daily_quota(self):
         value = parse_devin({"overage_balance": 0, "daily_percentage": 30, "hide_daily_quota": True})

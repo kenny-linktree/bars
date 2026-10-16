@@ -20,7 +20,7 @@ from bars_plugin.access import child_environment
 from bars_plugin.values import MAX_TEXT
 
 from .model import MAX_SNAPSHOT_BYTES, CollectionError, apply_enabled, encoded_size, now, reconcile, validate_result
-from .storage import SnapshotTooLarge, load_snapshot, write_snapshot, writer_lock
+from .storage import load_snapshot, write_snapshot, writer_lock
 
 # A valid result is a few kilobytes; anything near this is a plugin fault.
 MAX_RESULT_BYTES = 256 * 1024
@@ -291,12 +291,8 @@ def run(output, selected, timeout=DEFAULT_TIMEOUT, results=None, disabled=(), pl
         if apply_enabled(snapshot, disabled) or changed:
             snapshot["generated_at"] = now()
             # Too many plugins for one file is the one change that cannot be trimmed to fit;
-            # the previous readable snapshot stays, and the scheduler log says why.
-            try:
-                write_snapshot(output, snapshot)
-            except SnapshotTooLarge as error:
-                raise RuntimeError("Installed plugins exceed the snapshot size bound; remove some. "
-                                   "The previous snapshot was kept.") from error
+            # the previous readable snapshot stays, and the command reports why.
+            write_snapshot(output, snapshot)
         if not selected:
             return snapshot
         for pid in [pid for pid in selected if not by_id[pid].loadable]:

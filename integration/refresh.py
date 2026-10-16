@@ -23,6 +23,9 @@ MAX_RUN_SECONDS = 120
 # Allow an explicit request to follow a bounded run and its publication/cleanup.
 MAX_LOCK_WAIT_SECONDS = 150
 MAX_CONFIG_BYTES = 65536
+# The collector's exit status when the installed plugins no longer fit one snapshot file
+# (bars_collector.__main__.SNAPSHOT_TOO_LARGE_STATUS); refresh.py runs it as a subprocess.
+SNAPSHOT_TOO_LARGE_STATUS = 78
 # The dropdown reads the published file directly, so it is always current. The desktop
 # widget only redraws when WidgetKit reloads its timeline, and WidgetKit budgets those
 # reloads per day. With a collection every minute, a reload is requested only when the
@@ -353,6 +356,10 @@ def collect_and_publish(config: dict, directory: Path, provider: str | None,
         if cancelled:
             return 128 + signal.SIGTERM
         log_statuses(output, logger)
+        if process.returncode == SNAPSHOT_TOO_LARGE_STATUS:
+            logger.error("Collector exited with status %s: the installed plugins exceed the snapshot size bound. "
+                         "Remove some plugins. The previous snapshot was kept.", process.returncode)
+            return 1
         if process.returncode:
             logger.error("Collector exited with status %s.", process.returncode)
             return 1

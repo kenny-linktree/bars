@@ -5,7 +5,10 @@ import sys
 
 from .plugins import PLUGIN_ID, discover
 from .runner import DEFAULT_TIMEOUT, CollectionCancelled, collect_results, run
-from .storage import AlreadyRunning
+from .storage import AlreadyRunning, SnapshotTooLarge
+
+# Exit status the scheduler translates into a fixed explanation; stderr itself is not forwarded.
+SNAPSHOT_TOO_LARGE_STATUS = 78
 
 SUPPORT = Path.home() / "Library/Application Support/Bars"
 DETECT_TIMEOUT = 20
@@ -71,6 +74,10 @@ def main(argv=None):
     except AlreadyRunning:
         print("Bars collection is already running.", file=sys.stderr)
         return 75
+    except SnapshotTooLarge:
+        print("Installed plugins exceed the snapshot size bound; remove some. The previous snapshot was kept.",
+              file=sys.stderr)
+        return SNAPSHOT_TOO_LARGE_STATUS
     except Exception:
         print("Bars could not read or publish its snapshot. Check the output directory and existing snapshot.", file=sys.stderr)
         return 1
