@@ -20,7 +20,7 @@ struct PreviewVariant {
 }
 
 enum Fixtures {
-    static let names = ["live", "stale", "mixed", "heavy", "previous", "empty", "setup", "hidden", "subscription", "many"]
+    static let names = ["live", "stale", "mixed", "heavy", "previous", "empty", "setup", "hidden", "subscription", "many", "dense"]
     static let syntheticNames = names.filter { $0 != "live" }
     /// Synthetic variants share one fixed instant so their renders are deterministic.
     static let fixedNow = utc("2026-10-09T17:00:00Z")
@@ -50,6 +50,7 @@ enum Fixtures {
             case "hidden": variant = .init(name: name, now: fixedNow, snapshot: hidden(now: fixedNow))
             case "subscription": variant = .init(name: name, now: fixedNow, snapshot: subscription(now: fixedNow))
             case "many": variant = .init(name: name, now: fixedNow, snapshot: many(now: fixedNow))
+            case "dense": variant = .init(name: name, now: fixedNow, snapshot: dense(now: fixedNow))
             case "empty":
                 // First launch: BarsModel's initial snapshot plus its missing-file storage message.
                 variant = .init(name: name, now: fixedNow,
@@ -99,6 +100,27 @@ enum Fixtures {
                 ]))
         }
         snapshot.providers.sort { $0.id < $1.id }
+        return snapshot
+    }
+
+    /// Every standard provider selecting the contract maximum of 31 secondary allowances: the
+    /// widget's shared mini-bar budget must keep the header and all four rows visible.
+    static func dense(now: Date) -> UsageSnapshot {
+        var snapshot = baseline(now: now)
+        for index in snapshot.providers.indices {
+            guard let primary = snapshot.providers[index].primaryMetricId else { continue }
+            var extra: [UsageMetric] = []
+            for number in 0..<31 {
+                let used = Double((number * 3) % 100)
+                let reset = now.addingTimeInterval(Double(number + 1) * 3_600)
+                extra.append(UsageMetric(id: "extra\(number)", label: "Extra allowance \(number)", kind: .quota,
+                                         scope: .individual, unit: "%", used: used, limit: 100, remaining: 100 - used,
+                                         resetsAt: reset, period: "day"))
+            }
+            let kept: [UsageMetric] = snapshot.providers[index].metrics.filter { $0.id == primary }
+            snapshot.providers[index].metrics = kept + extra
+            snapshot.providers[index].secondaryMetricIds = extra.map { $0.id }
+        }
         return snapshot
     }
 

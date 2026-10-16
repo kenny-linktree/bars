@@ -1076,6 +1076,26 @@ class InstallationTransactionTests(unittest.TestCase):
         self.assertFalse((plugins / "claude").exists())
         self.assertTrue((plugins / "codex").is_symlink())
 
+    def test_writes_refuse_any_destination_directory_that_became_a_link(self):
+        # Not only plugin directories: the LaunchAgents directory swapped for a link after
+        # the preflight must not redirect the plist write, and rollback must not follow it.
+        elsewhere = Path(self.temporary.name) / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / f"{installer.LABEL}.plist").write_text("someone else's agent")
+        real_private = installer.private_directory
+
+        def swap_agents(path):
+            real_private(path)
+            if path.name == "devin":  # the last plugin directory: everything else is prepared
+                shutil.rmtree(self.agents)
+                self.agents.symlink_to(elsewhere)
+        with patch.object(installer, "private_directory", swap_agents), \
+                self.assertRaisesRegex(RuntimeError, "changed during installation"):
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        self.assertEqual((elsewhere / f"{installer.LABEL}.plist").read_text(), "someone else's agent")
+        self.assertEqual((self.destination / "Contents/MacOS/Bars").read_text(), "old")
+        self.assertEqual((self.support / "installation.json").read_text(), "old config")
+
     def test_settings_changed_while_the_installer_waits_are_kept(self):
         # The app edits disabled_providers in place; a change made while an earlier refresh
         # held the lock must survive, and keys this installer does not know are carried over.

@@ -353,10 +353,33 @@ enum UsagePresentation {
     /// Mini bars a compact row shows at most. A plugin may select up to 31, which no widget
     /// can hold; the rest remain in details, where every metric appears.
     static let compactSecondaryLimit = 3
+    /// Mini bars the whole widget shows at most: the standard four providers' six fit the
+    /// large widget, and the budget keeps dense plugins from pushing other rows off it.
+    static let compactSecondaryBudget = 6
+
+    /// How many mini bars each compact row may show, given how many each provider selected.
+    /// Rows take one in turn until each has all it selected, the per-row limit, or the budget
+    /// is spent, so a dense plugin cannot starve the rows after it.
+    static func compactSecondaryAllocation(_ counts: [Int], budget: Int = compactSecondaryBudget,
+                                           perRow: Int = compactSecondaryLimit) -> [Int] {
+        var shown = Array(repeating: 0, count: counts.count)
+        var remaining = budget
+        var progressed = true
+        while remaining > 0 && progressed {
+            progressed = false
+            for index in counts.indices where shown[index] < min(counts[index], perRow) && remaining > 0 {
+                shown[index] += 1
+                remaining -= 1
+                progressed = true
+            }
+        }
+        return shown
+    }
 
     /// The secondary allowances a compact row shows, and how many it leaves to details.
-    static func compactSecondaryAllowances(_ allowances: [SecondaryAllowance]) -> (shown: [SecondaryAllowance], omitted: Int) {
-        (Array(allowances.prefix(compactSecondaryLimit)), max(0, allowances.count - compactSecondaryLimit))
+    static func compactSecondaryAllowances(_ allowances: [SecondaryAllowance],
+                                           limit: Int = compactSecondaryLimit) -> (shown: [SecondaryAllowance], omitted: Int) {
+        (Array(allowances.prefix(limit)), max(0, allowances.count - limit))
     }
 
     static func secondaryAllowances(for provider: ProviderSnapshot, now: Date, locale: Locale = .current,

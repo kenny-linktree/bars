@@ -88,6 +88,8 @@ struct ProviderRow: View {
     var compact = false
     /// The consolidated freshness shown in the header. Without it every row shows its own age.
     var latestFetch: Date?
+    /// Mini bars this compact row may show; the widget allocates its budget across rows.
+    var compactSecondaryLimit = UsagePresentation.compactSecondaryLimit
 
     private var captionSize: CGFloat { compact ? 9 : 11 }
 
@@ -104,16 +106,14 @@ struct ProviderRow: View {
                 }
                 paceAndContext(metric, pace: pace)
                 let allowances = UsagePresentation.secondaryAllowances(for: provider, now: now)
-                let shown = compact ? UsagePresentation.compactSecondaryAllowances(allowances) : (shown: allowances, omitted: 0)
+                let shown = compact ? UsagePresentation.compactSecondaryAllowances(allowances, limit: compactSecondaryLimit)
+                                    : (shown: allowances, omitted: 0)
+                // Allowances beyond the compact limit are counted on the last mini bar's caption
+                // rather than on a line of their own, so a dense plugin adds no height.
                 ForEach(shown.shown) { allowance in
-                    SecondaryAllowanceRow(allowance: allowance, stale: provider.isStale(at: now), compact: compact)
+                    SecondaryAllowanceRow(allowance: allowance, stale: provider.isStale(at: now), compact: compact,
+                                          omitted: allowance.id == shown.shown.last?.id ? shown.omitted : 0)
                         .padding(.top, compact ? 0 : 2)
-                }
-                if shown.omitted > 0 {
-                    Text("\(shown.omitted) more in Bars")
-                        .font(.system(size: captionSize))
-                        .foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             } else if UsagePresentation.isNotSetUp(provider) {
                 notSetUp
@@ -267,6 +267,8 @@ struct SecondaryAllowanceRow: View {
     let allowance: SecondaryAllowance
     var stale = false
     var compact = false
+    /// Further allowances the compact row leaves to details, named on this caption.
+    var omitted = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 2 : 3) {
@@ -291,8 +293,9 @@ struct SecondaryAllowanceRow: View {
     private var caption: Text {
         let label = Text(allowance.label).foregroundStyle(.tertiary)
         let reset = allowance.reset.map { Text(" · \($0)").foregroundStyle(.tertiary) } ?? Text("")
-        guard let note = allowance.note else { return Text("\(label)\(reset)") }
+        let more = omitted > 0 ? Text(" · \(omitted) more in Bars").foregroundStyle(.tertiary) : Text("")
+        guard let note = allowance.note else { return Text("\(label)\(reset)\(more)") }
         let tag = Text(" · \(note.text)").fontWeight(.medium).foregroundStyle(BarsPalette.note(note))
-        return Text("\(label)\(reset)\(tag)")
+        return Text("\(label)\(reset)\(tag)\(more)")
     }
 }

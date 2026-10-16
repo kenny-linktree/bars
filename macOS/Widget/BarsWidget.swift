@@ -97,10 +97,13 @@ struct BarsWidgetView: View {
             // snapshot order, are shown and a footer counts the rest; the dropdown shows them all.
             let visible = entry.snapshot.visibleProviders
             let providers = Array(visible.prefix(Self.maximumRows))
-            ForEach(providers) { provider in
+            let limits = UsagePresentation.compactSecondaryAllocation(
+                providers.map { UsagePresentation.secondaryAllowances(for: $0, now: entry.date).count })
+            ForEach(Array(providers.enumerated()), id: \.element.id) { index, provider in
                 rowGap(capped: providers.count < UsageSnapshot.standardProviderCount)
                 Link(destination: provider.id.deepLink) {
-                    ProviderRow(provider: provider, now: entry.date, compact: true, latestFetch: latest)
+                    ProviderRow(provider: provider, now: entry.date, compact: true, latestFetch: latest,
+                                compactSecondaryLimit: limits[index])
                         .fixedSize(horizontal: false, vertical: pinRowHeights)
                 }
                 .buttonStyle(.plain)

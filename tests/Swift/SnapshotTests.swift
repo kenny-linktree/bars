@@ -1093,6 +1093,14 @@ final class SnapshotTests: XCTestCase {
         let few = UsagePresentation.compactSecondaryAllowances(Array(many.prefix(2)))
         XCTAssertEqual(few.shown.count, 2)
         XCTAssertEqual(few.omitted, 0)
+        // The widget shares a budget of six across rows, one at a time, so the standard four
+        // providers keep today's layout and a dense plugin cannot push the others off.
+        XCTAssertEqual(UsagePresentation.compactSecondaryAllocation([1, 1, 2, 2]), [1, 1, 2, 2])
+        XCTAssertEqual(UsagePresentation.compactSecondaryAllocation([31, 1, 2, 2]), [2, 1, 2, 1])
+        XCTAssertEqual(UsagePresentation.compactSecondaryAllocation([31, 31, 31, 31]), [2, 2, 1, 1])
+        XCTAssertEqual(UsagePresentation.compactSecondaryAllocation([31]), [3])
+        XCTAssertEqual(UsagePresentation.compactSecondaryAllocation([0, 0]), [0, 0])
+        XCTAssertEqual(UsagePresentation.compactSecondaryAllocation([]), [])
     }
 
     func testMissingFileIsDistinguishedFromOtherReadFailures() throws {

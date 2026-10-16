@@ -507,9 +507,9 @@ def install(app: Path, python: Path, *, start: bool = True,
                         created_directories.append(directory)
                     private_directory(directory)
                 for path, (data, mode) in files.items():
-                    # A plugin directory replaced by a link since planning would redirect the
-                    # write into whatever it points at; refuse rather than follow it.
-                    if path in plugin_files and not is_private_directory(path.parent):
+                    # A destination directory replaced by a link since the preflight would
+                    # redirect the write into whatever it points at; refuse rather than follow it.
+                    if not is_private_directory(path.parent):
                         raise RuntimeError(f"{path.parent} changed during installation; nothing was written there.")
                     written.append(path)
                     atomic_write(path, data, mode)
@@ -524,10 +524,10 @@ def install(app: Path, python: Path, *, start: bool = True,
                         shutil.rmtree(live)
                     if old.exists():
                         old.rename(live)
-                # Restore only what this run wrote, and never through a plugin directory that
-                # became a link meanwhile: that would edit whatever the link points at.
+                # Restore only what this run wrote, and never through a directory that became
+                # a link meanwhile: that would edit whatever the link points at.
                 for path in reversed(written):
-                    if path in plugin_files and not is_private_directory(path.parent):
+                    if not is_private_directory(path.parent):
                         continue
                     previous = previous_files[path]
                     if previous is None:
@@ -552,9 +552,10 @@ def install(app: Path, python: Path, *, start: bool = True,
             # while the refresh lock is held, so no publication races the restart.
             warnings = restart_user_interfaces(destination, executable,
                                                relaunch_app=start or app_was_running)
-        # RunAtLoad may have fired while installation held the refresh lock.
-        if start:
-            subprocess.run(["/bin/launchctl", "kickstart", service], check=True)
+        # RunAtLoad may have fired while installation held the refresh lock. Everything is
+        # installed by now, so a failed kick is a warning, not a failed installation.
+        if start and subprocess.run(["/bin/launchctl", "kickstart", service], check=False, **quiet).returncode:
+            warnings.append("The first collection could not be started; it runs at the next minute or on Refresh now.")
     finally:
         # If rollback itself fails, retain backup directories for recovery.
         if may_remove_staging:
