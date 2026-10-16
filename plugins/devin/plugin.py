@@ -17,6 +17,8 @@ MISSING = "Devin login was not found. Run devin auth login."
 UNREADABLE = "Devin login could not be read. Run devin auth login."
 ORGANIZATION = re.compile(r"[A-Za-z0-9_-]{1,128}")
 BALANCE_NOTE = "Devin reports only the remaining amount; purchased credits do not expire, so there is no reset."
+ON_DEMAND_NOTE = ("Used is your draw this cycle; left is what remains in the shared team pool. The bar compares the two, "
+                  "since Devin does not report the pool total.")
 QUOTA_URL = "https://app.devin.ai/api/%s/billing/quota/usage"
 MY_USAGE_URL = "https://app.devin.ai/api/%s/billing/quota/my-on-demand-usage"
 # A reported cycle of about this many days maps to the contract's named period lengths.
@@ -43,29 +45,27 @@ def cycle_period(start, end):
     return None
 
 
-def parse_my_usage(data):
-    """This person's draw on the shared balance in the current cycle, or None when unreported.
-
-    Devin reports the amount only, never a personal limit, so this is a `spend` with no bar.
-    """
-    data = obj(data)
-    if data.get("amount") is None:
+def on_demand(data, my_usage):
+    """One bar for the shared on-demand credits: this person's draw in the current cycle against
+    that draw plus what remains in the shared pool. Devin reports those two amounts and no pool
+    total, so the limit is their sum and the note says so. None when neither is reported."""
+    balance = obj(data).get("overage_balance")
+    mine = obj(my_usage)
+    used = mine.get("amount")
+    if balance is None and used is None:
         return None
-    end = data.get("cycle_end")
-    return metric("my_on_demand", "My on-demand usage", "spend", "individual", "USD", used=data["amount"],
-                  reset=end, period=cycle_period(data.get("cycle_start"), end))
+    end = mine.get("cycle_end")
+    if used is None:
+        return metric("on_demand", "On-demand credits", "balance", "team", "USD", remaining=balance, note=BALANCE_NOTE)
+    limit = None if balance is None else float(used) + float(balance)
+    return metric("on_demand", "On-demand credits", "budget", "team", "USD", used, limit, balance,
+                  reset=end, period=cycle_period(mine.get("cycle_start"), end), note=ON_DEMAND_NOTE)
 
 
 def parse(data, my_usage=None):
     data = obj(data)
     metrics = []
-    if data.get("overage_balance") is not None:
-        metrics.append(metric("on_demand_balance", "On-demand balance", "balance", "team", "USD",
-                              remaining=data["overage_balance"], note=BALANCE_NOTE))
-    mine = parse_my_usage(my_usage) if my_usage is not None else None
-    if mine is not None:
-        metrics.append(mine)
-    for period in ("daily", "weekly"):
+    for period in ("weekly", "daily"):
         if period == "daily" and data.get("hide_daily_quota") is True:
             continue
         used = data.get(period + "_percentage")
@@ -73,7 +73,10 @@ def parse(data, my_usage=None):
             metrics.append(metric(period, period.capitalize() + " quota", "quota", "unknown", "%", used, 100,
                                   reset=data.get(period + "_reset_at"),
                                   period="day" if period == "daily" else "week"))
-    return result("on_demand_balance", metrics, secondary=("my_on_demand", "daily", "weekly"))
+    credits = on_demand(data, my_usage)
+    if credits is not None:
+        metrics.append(credits)
+    return result("weekly", metrics, alternatives=("daily", "on_demand"), secondary=("daily", "on_demand"))
 
 
 def access_token():

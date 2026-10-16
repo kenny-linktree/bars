@@ -289,16 +289,14 @@ enum Fixtures {
                 metric("team_on_demand", "Team on-demand", .budget, .team, "USD",
                        used: 75, limit: 3_000, resetsAt: cursorReset, period: .month),
             ]),
-            provider(.devin, "Devin", primary: "on_demand_balance", secondary: ["my_on_demand", "daily", "weekly"], [
-                metric("on_demand_balance", "On-demand balance", .balance, .team, "USD",
-                       used: nil, limit: nil, remaining: 2_500, resetsAt: nil, period: nil,
-                       note: "Devin reports only the remaining amount; purchased credits do not expire, so there is no reset."),
-                metric("my_on_demand", "My on-demand usage", .spend, .individual, "USD",
-                       used: 137.5, limit: nil, resetsAt: monthStart, period: .month),
-                metric("daily", "Daily quota", .quota, .unknown, "%",
-                       used: 20, limit: 100, resetsAt: devinDaily, period: .day),
+            provider(.devin, "Devin", primary: "weekly", secondary: ["daily", "on_demand"], [
                 metric("weekly", "Weekly quota", .quota, .unknown, "%",
                        used: 45, limit: 100, resetsAt: devinWeekly, period: .week),
+                metric("daily", "Daily quota", .quota, .unknown, "%",
+                       used: 20, limit: 100, resetsAt: devinDaily, period: .day),
+                metric("on_demand", "On-demand credits", .budget, .team, "USD",
+                       used: 137.5, limit: 2_637.5, remaining: 2_500, resetsAt: monthStart, period: .month,
+                       note: "Used is your draw this cycle; left is what remains in the shared team pool. The bar compares the two, since Devin does not report the pool total."),
             ]),
         ])
     }

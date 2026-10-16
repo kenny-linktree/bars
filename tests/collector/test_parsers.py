@@ -49,12 +49,12 @@ class ParserTests(unittest.TestCase):
         value = parse_codex({"spend_control": {"individual_limit": {"used": "1", "unit": "credit"}},
                        "rate_limit": {"primary_window": {"used_percent": 1}}})
         self.assertEqual((value["primary_metric_id"], value["secondary_metric_ids"]), ("monthly_credits", []))
-        # Cursor: the on-demand allowances that are reported. Devin: its quotas, with a balance note.
+        # Cursor: the on-demand allowances that are reported. Devin: the daily quota and the credits bar.
         value = parse_cursor({"individualUsage": {"plan": {"used": 1}, "onDemand": {"used": 1}}})
         self.assertEqual(value["secondary_metric_ids"], ["individual_on_demand"])
         value = parse_devin({"overage_balance": 0, "daily_percentage": 1, "weekly_percentage": 1})
-        self.assertEqual(value["secondary_metric_ids"], ["daily", "weekly"])
-        self.assertEqual(value["metrics"][0]["note"], plugin("devin").BALANCE_NOTE)
+        self.assertEqual(value["secondary_metric_ids"], ["daily", "on_demand"])
+        self.assertEqual(value["metrics"][-1]["note"], plugin("devin").BALANCE_NOTE)
         self.assertIsNone(value["metrics"][1]["note"])
 
     def test_claude_missing_used_is_not_zero(self):
@@ -169,42 +169,48 @@ class ParserTests(unittest.TestCase):
                                 "teamUsage": {"onDemand": {"used": 100, "limit": 1000}}})
         self.assertIsNone(value["primary_metric_id"])
 
-    def test_devin_balance_is_not_spend_or_monthly(self):
+    def test_devin_weekly_quota_leads_and_credits_follow(self):
         value = parse_devin({"is_quota_plan": True, "has_quota_allocation": True,
-                               "overage_balance": -2.5, "daily_percentage": 0, "weekly_percentage": 120,
-                               "daily_reset_at": "2026-10-02T00:00:00Z", "weekly_reset_at": None,
-                               "hide_daily_quota": False})
-        balance, daily, weekly = value["metrics"]
-        self.assertEqual(value["primary_metric_id"], "on_demand_balance")
-        self.assertEqual((balance["kind"], balance["scope"], balance["remaining"]), ("balance", "team", -2.5))
-        self.assertIsNone(balance["used"])
-        self.assertIsNone(balance["limit"])
-        self.assertIsNone(balance["resets_at"])
-        self.assertEqual(daily["remaining"], 100)
-        self.assertEqual(weekly["remaining"], 0)
+                             "overage_balance": -2.5, "daily_percentage": 0, "weekly_percentage": 120,
+                             "daily_reset_at": "2026-10-02T00:00:00Z", "weekly_reset_at": None,
+                             "hide_daily_quota": False})
+        weekly, daily, credits = value["metrics"]
+        self.assertEqual(value["primary_metric_id"], "weekly")
+        self.assertEqual(value["secondary_metric_ids"], ["daily", "on_demand"])
         self.assertEqual(weekly["used"], 120)
+        self.assertEqual(weekly["remaining"], 0)
+        self.assertEqual(daily["remaining"], 100)
+        # Without the personal figure the credits stay a balance: remaining only, no bar, no reset.
+        self.assertEqual((credits["kind"], credits["scope"], credits["remaining"]), ("balance", "team", -2.5))
+        self.assertIsNone(credits["used"])
+        self.assertIsNone(credits["limit"])
+        self.assertIsNone(credits["resets_at"])
+        # Without a weekly figure the daily quota leads; without either, the credits do.
+        self.assertEqual(parse_devin({"overage_balance": 1, "daily_percentage": 3})["primary_metric_id"], "daily")
+        self.assertEqual(parse_devin({"overage_balance": 1})["primary_metric_id"], "on_demand")
 
-    def test_devin_personal_draw_is_a_spend_beneath_the_shared_balance(self):
-        value = parse_devin({"overage_balance": 10, "daily_percentage": 5},
+    def test_devin_credits_bar_compares_own_draw_with_the_shared_remainder(self):
+        value = parse_devin({"overage_balance": 10, "weekly_percentage": 5},
                             {"amount": 12.5, "cycle_start": "2026-10-01T00:00:00Z", "cycle_end": "2026-11-01T00:00:00Z"})
-        mine = next(m for m in value["metrics"] if m["id"] == "my_on_demand")
-        self.assertEqual((mine["kind"], mine["scope"], mine["unit"], mine["used"], mine["limit"], mine["period"]),
-                         ("spend", "individual", "USD", 12.5, None, "month"))
-        self.assertEqual(mine["resets_at"], "2026-11-01T00:00:00Z")
-        self.assertEqual(value["primary_metric_id"], "on_demand_balance")
-        self.assertEqual(value["secondary_metric_ids"], ["my_on_demand", "daily"])
-        # Without the second response, or without an amount, the balance and quotas stand alone.
-        self.assertNotIn("my_on_demand", [m["id"] for m in parse_devin({"overage_balance": 10})["metrics"]])
-        self.assertNotIn("my_on_demand", [m["id"] for m in parse_devin({"overage_balance": 10}, {"cycle_end": "x"})["metrics"]])
-        weekly = plugin("devin").cycle_period("2026-10-01T00:00:00Z", "2026-10-08T00:00:00Z")
-        self.assertEqual(weekly, "week")
+        credits = next(m for m in value["metrics"] if m["id"] == "on_demand")
+        self.assertEqual((credits["kind"], credits["scope"], credits["unit"], credits["period"]),
+                         ("budget", "team", "USD", "month"))
+        # used is this person's draw, remaining the pool's balance, and the limit their sum: never a pool total.
+        self.assertEqual((credits["used"], credits["remaining"], credits["limit"]), (12.5, 10, 22.5))
+        self.assertEqual(credits["resets_at"], "2026-11-01T00:00:00Z")
+        self.assertEqual(credits["note"], plugin("devin").ON_DEMAND_NOTE)
+        # A draw without a balance has no bar; neither figure means no credits metric at all.
+        alone = next(m for m in parse_devin({"weekly_percentage": 5}, {"amount": 3})["metrics"] if m["id"] == "on_demand")
+        self.assertEqual((alone["used"], alone["limit"], alone["remaining"]), (3, None, None))
+        self.assertEqual([m["id"] for m in parse_devin({"weekly_percentage": 5}, {"cycle_end": "x"})["metrics"]], ["weekly"])
+        self.assertEqual(plugin("devin").cycle_period("2026-10-01T00:00:00Z", "2026-10-08T00:00:00Z"), "week")
         self.assertIsNone(plugin("devin").cycle_period("2026-10-01T00:00:00Z", "2026-10-13T00:00:00Z"))
         with self.assertRaises(CollectionError):
             parse_devin({"overage_balance": 10}, {"amount": -1})
 
     def test_devin_hidden_daily_quota(self):
         value = parse_devin({"overage_balance": 0, "daily_percentage": 30, "hide_daily_quota": True})
-        self.assertEqual([m["id"] for m in value["metrics"]], ["on_demand_balance"])
+        self.assertEqual([m["id"] for m in value["metrics"]], ["on_demand"])
 
     def test_empty_malformed_and_nonfinite_responses_fail(self):
         for parse in (parse_claude, parse_codex, parse_cursor, parse_devin):
@@ -226,7 +232,7 @@ class ParserTests(unittest.TestCase):
         cursor = parse_cursor({"individualUsage": {"plan": {"used": 1}, "onDemand": {"used": 1}}})
         self.assertEqual([m["period"] for m in cursor["metrics"]], ["month", "month"])
         devin = parse_devin({"overage_balance": 0, "daily_percentage": 1, "weekly_percentage": 1})
-        self.assertEqual([m["period"] for m in devin["metrics"]], [None, "day", "week"])
+        self.assertEqual([m["period"] for m in devin["metrics"]], ["week", "day", None])
 
     def test_invalid_source_reset_is_not_silently_lost(self):
         with self.assertRaises(CollectionError):
