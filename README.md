@@ -14,7 +14,7 @@ Screenshots use synthetic data.
 ## What it shows
 
 - **Usage and pace.** Each bar shows usage against an allowance. A tick marks the elapsed share of its period; the pace line estimates whether you will run out before it resets.
-- **Your provider's allowances.** Claude and Codex support reported monthly budgets, credits and personal subscription quotas. Cursor keeps individual and team amounts separate. Devin shows its on-demand balance alongside daily and weekly quotas. Support is best effort; not every subscription tier has been verified.
+- **Your provider's allowances.** Claude and Codex support reported monthly budgets, credits and personal subscription quotas. Cursor keeps individual and team amounts separate. Devin shows the shared on-demand balance, your own draw on it this cycle, and the daily and weekly quotas. Support is best effort; not every subscription tier has been verified.
 - **Details when you need them.** Click a provider in the widget or dropdown for its allowances, reset times and a manual refresh. Failed refreshes keep the last successful values and show their age.
 
 Bars collects in the background about every minute, even when the menu bar app is closed, retrying a provider that fails briefly within that minute. The dropdown always shows the latest collection. The desktop widget is asked to redraw when values change, at most every five minutes, and WidgetKit controls when it actually redraws, so it can lag behind the dropdown.
@@ -46,7 +46,7 @@ Bars reuses your existing provider logins. There is no Bars account, telemetry o
 | Claude | `Claude Code-credentials` in the macOS Keychain | `api.anthropic.com` |
 | Codex | `~/.codex/auth.json` | `chatgpt.com` |
 | Cursor | `cursor-access-token` in the macOS Keychain | `cursor.com` |
-| Devin | `~/.local/share/devin/credentials.toml`; organization from `devin cloud drs whoami` | `app.devin.ai` |
+| Devin | `~/.local/share/devin/credentials.toml`; organization from `devin cloud drs whoami` | `app.devin.ai` (two endpoints) |
 
 The collector does not write, refresh or rotate these logins. Each credential goes only to its provider's fixed usage endpoint over verified HTTPS, with redirects refused. The Devin CLI performs its own organization lookup and may manage its own login. A plugin you add runs as you, with the same access as any script you run; install only plugins you trust.
 

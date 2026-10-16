@@ -186,12 +186,13 @@ class EndpointTests(unittest.TestCase):
                 patch.object(access, "opener", return_value=self.fake_opener(body)):
             result = plugin(pid).collect()
         self.assertEqual(self.login_files(), logins, "login files are read, never written")
-        self.assertEqual(len(self.requests), 1, "exactly one request, no retries")
-        request, timeout = self.requests[0]
-        self.assertEqual(timeout, 12)
+        # Devin asks two fixed endpoints (shared balance and quotas, then this person's draw).
+        self.assertEqual(len(self.requests), 2 if pid == "devin" else 1, "one request per endpoint, no retries")
+        for request, timeout in self.requests:
+            self.assertEqual(timeout, 12)
         for secret in SECRETS:
             self.assertNotIn(secret, json.dumps(result))
-        return request
+        return self.requests[0][0]
 
     def assert_only_own_secrets(self, request, own):
         headers = request.header_items()
@@ -224,6 +225,9 @@ class EndpointTests(unittest.TestCase):
     def test_devin_uses_fixed_host_and_minimal_cli_environment(self):
         request = self.collect("devin", {"overage_balance": 1})
         self.assertEqual(request.full_url, "https://app.devin.ai/api/%s/billing/quota/usage" % DEVIN_ORG)
+        second = self.requests[1][0]
+        self.assertEqual(second.full_url, "https://app.devin.ai/api/%s/billing/quota/my-on-demand-usage" % DEVIN_ORG)
+        self.assert_only_own_secrets(second, {DEVIN_TOKEN})
         self.assertEqual(request.get_header("Authorization"), "Bearer " + DEVIN_TOKEN)
         self.assert_only_own_secrets(request, {DEVIN_TOKEN})
         cli_environment = dict(line.split("=", 1) for line in (self.home / "devin-env").read_text().splitlines()

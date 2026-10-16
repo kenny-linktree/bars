@@ -289,10 +289,12 @@ enum Fixtures {
                 metric("team_on_demand", "Team on-demand", .budget, .team, "USD",
                        used: 75, limit: 3_000, resetsAt: cursorReset, period: .month),
             ]),
-            provider(.devin, "Devin", primary: "on_demand_balance", secondary: ["daily", "weekly"], [
+            provider(.devin, "Devin", primary: "on_demand_balance", secondary: ["my_on_demand", "daily", "weekly"], [
                 metric("on_demand_balance", "On-demand balance", .balance, .team, "USD",
                        used: nil, limit: nil, remaining: 2_500, resetsAt: nil, period: nil,
                        note: "Devin reports only the remaining amount; purchased credits do not expire, so there is no reset."),
+                metric("my_on_demand", "My on-demand usage", .spend, .individual, "USD",
+                       used: 137.5, limit: nil, resetsAt: monthStart, period: .month),
                 metric("daily", "Daily quota", .quota, .unknown, "%",
                        used: 20, limit: 100, resetsAt: devinDaily, period: .day),
                 metric("weekly", "Weekly quota", .quota, .unknown, "%",

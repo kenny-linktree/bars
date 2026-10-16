@@ -184,6 +184,24 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(weekly["remaining"], 0)
         self.assertEqual(weekly["used"], 120)
 
+    def test_devin_personal_draw_is_a_spend_beneath_the_shared_balance(self):
+        value = parse_devin({"overage_balance": 10, "daily_percentage": 5},
+                            {"amount": 12.5, "cycle_start": "2026-10-01T00:00:00Z", "cycle_end": "2026-11-01T00:00:00Z"})
+        mine = next(m for m in value["metrics"] if m["id"] == "my_on_demand")
+        self.assertEqual((mine["kind"], mine["scope"], mine["unit"], mine["used"], mine["limit"], mine["period"]),
+                         ("spend", "individual", "USD", 12.5, None, "month"))
+        self.assertEqual(mine["resets_at"], "2026-11-01T00:00:00Z")
+        self.assertEqual(value["primary_metric_id"], "on_demand_balance")
+        self.assertEqual(value["secondary_metric_ids"], ["my_on_demand", "daily"])
+        # Without the second response, or without an amount, the balance and quotas stand alone.
+        self.assertNotIn("my_on_demand", [m["id"] for m in parse_devin({"overage_balance": 10})["metrics"]])
+        self.assertNotIn("my_on_demand", [m["id"] for m in parse_devin({"overage_balance": 10}, {"cycle_end": "x"})["metrics"]])
+        weekly = plugin("devin").cycle_period("2026-10-01T00:00:00Z", "2026-10-08T00:00:00Z")
+        self.assertEqual(weekly, "week")
+        self.assertIsNone(plugin("devin").cycle_period("2026-10-01T00:00:00Z", "2026-10-13T00:00:00Z"))
+        with self.assertRaises(CollectionError):
+            parse_devin({"overage_balance": 10}, {"amount": -1})
+
     def test_devin_hidden_daily_quota(self):
         value = parse_devin({"overage_balance": 0, "daily_percentage": 30, "hide_daily_quota": True})
         self.assertEqual([m["id"] for m in value["metrics"]], ["on_demand_balance"])
