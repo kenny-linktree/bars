@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
+import random
 import re
 import signal
 import stat
@@ -17,18 +19,30 @@ import sys
 import tempfile
 import time
 
-PROVIDERS = ("claude", "codex", "cursor", "devin")
 MAX_RUN_SECONDS = 120
 # Allow an explicit request to follow a bounded run and its publication/cleanup.
 MAX_LOCK_WAIT_SECONDS = 150
 MAX_CONFIG_BYTES = 65536
+# The dropdown reads the published file directly, so it is always current. The desktop
+# widget only redraws when WidgetKit reloads its timeline, and WidgetKit budgets those
+# reloads per day. With a collection every minute, a reload is requested only when the
+# displayed values changed and at least this long has passed since the last reload, or
+# when this long has passed regardless (so the widget's "Updated" time keeps moving), or
+# for an explicit refresh from the app. The widget's own 15-minute fallback still applies.
+WIDGET_RELOAD_MIN_SECONDS = 5 * 60
+WIDGET_RELOAD_MAX_SECONDS = 15 * 60
+WIDGET_RELOAD_STATE = "widget-reload.json"
+# Fields that change on every run without changing what the widget shows.
+_TIMESTAMP_FIELDS = ("generated_at", "fetched_at", "last_attempt_at")
+# A provider plugin id, the same grammar the collector enforces for plugin directories.
+_PROVIDER_ID = re.compile(r"[a-z][a-z0-9_]{0,31}")
 _LOGGABLE_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
 # The collector's standard output is one status-only line, such as
 # "claude: ok; codex: setup; cursor: disabled; devin: error". Only output in exactly
 # that form is logged; anything else is reduced to a fixed line.
 MAX_STATUS_BYTES = 4096
-_STATUS_ENTRY = re.compile(r"(claude|codex|cursor|devin): (ok|error|login_required|setup|disabled)")
-# Keep in step with the credential tools' environment in bars_collector/adapters.py.
+_STATUS_ENTRY = re.compile(r"([a-z][a-z0-9_]{0,31}): (ok|error|login_required|setup|disabled)")
+# Keep in step with the credential tools' environment in bars_plugin/access.py.
 CHILD_ENVIRONMENT = (
     "HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
     "__CF_USER_TEXT_ENCODING", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
@@ -95,6 +109,76 @@ def revision(path: Path) -> tuple[int, int] | None:
         return None
 
 
+def jitter_delay(seconds: float, *, sleep=time.sleep, draw=random.random) -> float:
+    """Wait a uniformly random time up to `seconds` so Macs on the same minute schedule do
+    not all ask the providers at once. Zero means no wait. Returns the time waited."""
+    if seconds <= 0:
+        return 0.0
+    delay = draw() * seconds
+    sleep(delay)
+    return delay
+
+
+def display_digest(snapshot: Path) -> str | None:
+    """A digest of everything in the snapshot that affects what the widget shows, or None
+    when the file cannot be read. Timestamps are excluded, so a run that only refreshed
+    `fetched_at` has the same digest as the run before it."""
+    try:
+        with os.fdopen(open_private(snapshot, os.O_RDONLY | os.O_NONBLOCK), "rb") as file:
+            data = json.loads(file.read(1024 * 1024 + 1))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    view = {key: value for key, value in data.items() if key not in _TIMESTAMP_FIELDS}
+    if isinstance(view.get("providers"), list):
+        view["providers"] = [{k: v for k, v in p.items() if k not in _TIMESTAMP_FIELDS} if isinstance(p, dict) else p
+                             for p in view["providers"]]
+    return hashlib.sha256(json.dumps(view, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def read_reload_state(directory: Path) -> dict:
+    try:
+        with os.fdopen(open_private(directory / WIDGET_RELOAD_STATE, os.O_RDONLY | os.O_NONBLOCK), "rb") as file:
+            state = json.loads(file.read(4096))
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def write_reload_state(directory: Path, digest: str | None, at: float) -> None:
+    data = json.dumps({"digest": digest, "at": at}).encode()
+    descriptor, temporary = tempfile.mkstemp(prefix="." + WIDGET_RELOAD_STATE + ".", dir=directory)
+    try:
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(data)
+        os.replace(temporary, directory / WIDGET_RELOAD_STATE)
+    except OSError:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+
+
+def should_reload_widget(directory: Path, snapshot: Path, *, explicit: bool, now: float = None) -> tuple[bool, str | None]:
+    """Whether the final publication should ask WidgetKit for a timeline reload.
+
+    Returns the decision and the current display digest to record if a reload is made.
+    """
+    now = time.time() if now is None else now
+    digest = display_digest(snapshot)
+    if explicit or digest is None:
+        return True, digest
+    state = read_reload_state(directory)
+    last = state.get("at")
+    since = (now - last) if isinstance(last, (int, float)) and not isinstance(last, bool) else float("inf")
+    # A recorded time in the future (the clock was set back) or a corrupt one must not
+    # suppress reloads until the clock catches up; treat it as never reloaded.
+    if since != since or since < 0 or since >= WIDGET_RELOAD_MAX_SECONDS:
+        return True, digest
+    return digest != state.get("digest") and since >= WIDGET_RELOAD_MIN_SECONDS, digest
+
+
 def publish(executable: Path, snapshot: Path, *, reload: bool) -> bool:
     args = [str(executable), "--publish-snapshot", str(snapshot)]
     if not reload:
@@ -153,17 +237,20 @@ def log_statuses(output, logger: logging.Logger) -> None:
 
 
 def disabled_providers(config: dict, logger: logging.Logger) -> list[str]:
-    """Provider IDs that are disabled, in provider order. Missing means none."""
+    """Provider IDs that are disabled, each once, in the file's order. Missing means none.
+
+    Only well-formed plugin ids are passed on; the collector ignores ids with no plugin.
+    """
     value = config.get("disabled_providers", [])
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         logger.error("Ignoring invalid disabled_providers in installation.json; collecting all providers.")
         return []
-    unknown = sorted(set(value) - set(PROVIDERS))
-    if unknown:
+    invalid = sorted(set(pid for pid in value if not _PROVIDER_ID.fullmatch(pid)))
+    if invalid:
         # The file is user-editable: never let its text forge or split log lines.
-        names = [pid if _LOGGABLE_ID.fullmatch(pid) else "(invalid)" for pid in unknown]
-        logger.warning("Ignoring unknown disabled providers: %s.", ", ".join(names))
-    return [pid for pid in PROVIDERS if pid in value]
+        names = [pid if _LOGGABLE_ID.fullmatch(pid) else "(invalid)" for pid in invalid]
+        logger.warning("Ignoring invalid disabled provider ids: %s.", ", ".join(names))
+    return list(dict.fromkeys(pid for pid in value if _PROVIDER_ID.fullmatch(pid)))
 
 
 def acquire_refresh_lock(lock, *, wait: bool, logger: logging.Logger) -> bool:
@@ -188,10 +275,13 @@ def acquire_refresh_lock(lock, *, wait: bool, logger: logging.Logger) -> bool:
 
 
 def collect_and_publish(config: dict, directory: Path, provider: str | None,
-                        logger: logging.Logger) -> int:
+                        logger: logging.Logger, *, explicit: bool = True) -> int:
+    """Run the collector once and publish. `explicit` marks a refresh the person asked for,
+    which always requests a widget reload; scheduled runs reload on the throttled policy."""
     snapshot = directory / "snapshot.json"
     executable = Path(config["app_executable"])
-    args = [config["python"], "-m", "bars_collector", "--output", str(snapshot)]
+    args = [config["python"], "-m", "bars_collector", "--output", str(snapshot),
+            "--plugins", str(config.get("plugins_path") or directory / "plugins")]
     if provider:
         args += ["--provider", provider]
     # The collector skips disabled workers and records every provider's enabled state.
@@ -254,9 +344,12 @@ def collect_and_publish(config: dict, directory: Path, provider: str | None,
         # A successful no-op still retries saved data after an earlier publication
         # failure. Provider fetch timestamps stay unchanged in that saved snapshot.
         if current is not None and (changed or published or publication_failed or process.returncode == 0):
-            if not publish(executable, snapshot, reload=True):
+            reload, digest = should_reload_widget(directory, snapshot, explicit=explicit)
+            if not publish(executable, snapshot, reload=reload):
                 logger.error("Saved results could not be published to widget storage.")
                 return 1
+            if reload:
+                write_reload_state(directory, digest, time.time())
         if cancelled:
             return 128 + signal.SIGTERM
         log_statuses(output, logger)
@@ -275,16 +368,33 @@ def collect_and_publish(config: dict, directory: Path, provider: str | None,
             signal.signal(signal.SIGTERM, previous_handler)
 
 
+def provider_id(value: str) -> str:
+    if not _PROVIDER_ID.fullmatch(value):
+        raise argparse.ArgumentTypeError("provider ids are lowercase letters, digits and underscores")
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--provider", choices=PROVIDERS)
+    parser.add_argument("--provider", type=provider_id, metavar="ID")
     parser.add_argument("--wait", action="store_true",
                         help="Wait up to 150 seconds for an active refresh before collecting.")
+    parser.add_argument("--scheduled", action="store_true",
+                        help="A launchd run: wait a random time up to --jitter seconds first, skip if another "
+                             "refresh is running, and request widget reloads on the throttled schedule.")
+    parser.add_argument("--jitter", type=float, default=5.0, metavar="SECONDS",
+                        help="Longest random wait before a --scheduled run (default 5).")
     parser.add_argument("--support-dir", type=Path,
                         default=Path.home() / "Library/Application Support/Bars")
     args = parser.parse_args()
+    if args.scheduled and args.wait:
+        parser.error("--scheduled and --wait cannot be combined")
+    if not 0 <= args.jitter <= 30:
+        parser.error("--jitter must be between 0 and 30 seconds")
     directory = args.support_dir.expanduser()
     os.umask(0o077)
+    if args.scheduled:
+        jitter_delay(args.jitter)
     # A failed log write must never print a traceback, which launchd copies into
     # logs/launchd.log; the refresh itself continues.
     logging.raiseExceptions = False
@@ -301,7 +411,7 @@ def main() -> int:
                 return 1 if args.wait else 0
             # Read after acquiring the lock: the app can edit settings while we wait.
             config = read_config(directory / "installation.json")
-            return collect_and_publish(config, directory, args.provider, logger)
+            return collect_and_publish(config, directory, args.provider, logger, explicit=not args.scheduled)
     except Exception as error:
         # Exception bodies may contain local credential paths or subprocess output,
         # and launchd copies stderr into logs/launchd.log, so report only the type.

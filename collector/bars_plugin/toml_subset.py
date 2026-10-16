@@ -12,7 +12,7 @@ CLI writes a flat file of bare keys and basic strings, so Bars reads only:
 Everything else, including literal and multi-line strings, floats, dates, arrays,
 inline tables, quoted or dotted keys, array tables and duplicate keys or tables,
 raises TOMLSubsetError. It subclasses ValueError, the same failure path that
-tomllib.TOMLDecodeError took in the adapters. Error messages carry line numbers only,
+tomllib.TOMLDecodeError would take. Error messages carry line numbers only,
 never file content, because the file holds credentials.
 """
 

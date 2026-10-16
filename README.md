@@ -17,7 +17,7 @@ Screenshots use synthetic data.
 - **Your provider's allowances.** Claude and Codex support reported monthly budgets, credits and personal subscription quotas. Cursor keeps individual and team amounts separate. Devin shows its on-demand balance alongside daily and weekly quotas. Support is best effort; not every subscription tier has been verified.
 - **Details when you need them.** Click a provider in the widget or dropdown for its allowances, reset times and a manual refresh. Failed refreshes keep the last successful values and show their age.
 
-Bars collects in the background every 15 minutes, even when the menu bar app is closed. WidgetKit controls the desktop widget's redraw timing, so it can lag behind the dropdown.
+Bars collects in the background about every minute, even when the menu bar app is closed, retrying a provider that fails briefly within that minute. The dropdown always shows the latest collection. The desktop widget is asked to redraw when values change, at most every five minutes, and WidgetKit controls when it actually redraws, so it can lag behind the dropdown.
 
 ## Install
 
@@ -48,7 +48,7 @@ Bars reuses your existing provider logins. There is no Bars account, telemetry o
 | Cursor | `cursor-access-token` in the macOS Keychain | `cursor.com` |
 | Devin | `~/.local/share/devin/credentials.toml`; organization from `devin cloud drs whoami` | `app.devin.ai` |
 
-The collector does not write, refresh or rotate these logins. Each credential goes only to its provider's fixed usage endpoint over verified HTTPS, with redirects refused. The Devin CLI performs its own organization lookup and may manage its own login.
+The collector does not write, refresh or rotate these logins. Each credential goes only to its provider's fixed usage endpoint over verified HTTPS, with redirects refused. The Devin CLI performs its own organization lookup and may manage its own login. A plugin you add runs as you, with the same access as any script you run; install only plugins you trust.
 
 Keychain access may prompt. Choosing **Always Allow** permits other processes running as your user to read that item through `/usr/bin/security`; choose **Allow** if you want a prompt each time.
 
@@ -61,6 +61,10 @@ Bars is independent of the providers. Their usage endpoints are not published AP
 The first install checks for local logins and hides providers without one. You can hide or show providers from the Bars dropdown; hidden providers are not collected. Updates preserve your selection. If a login expires, sign in through the provider's client, then refresh Bars.
 
 For command-line selection, see [provider options](docs/distribution.md#provider-selection).
+
+## Adding a provider
+
+Each provider is a plugin: a directory with a small manifest and one Python module under `~/Library/Application Support/Bars/plugins`. Claude, Codex, Cursor and Devin are the standard plugins; add your own for any other service by writing a plugin there, with no change to Bars. Each plugin runs in its own bounded worker process, so a faulty plugin affects only its own row. Updates refresh the standard plugins but keep any file you edited. See [provider plugins](docs/plugins.md) for the interface.
 
 ## Updating
 

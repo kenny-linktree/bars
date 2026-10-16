@@ -44,11 +44,14 @@ func XCTAssertThrowsError<T>(_ value: @autoclosure () throws -> T, file: StaticS
         tests.testSecondaryAllowancesShowValueResetAndAttentionTags()
         tests.testSubscriptionWindowsKeepTheirIdentityAndDoNotRepeatPrimary()
         tests.testResetCaptionsUseLocalTimeAndMarkOnlyEstimates()
-        tests.testEstimatedResetUsesUTCMonthAndRetainsStalePeriod()
+        tests.testReadersNeverInventAResetAndEstimatesRetainStalePeriod()
+        try tests.testManifestFieldsDecodeAndDegradeWhenAbsent()
+        try tests.testPublisherEnforcesContractBoundsOnLinksMetricsAndText()
         try tests.testPublishedPathIsSeparateFromCollectorStaging()
         try tests.testOversizedOrSymlinkSourceDoesNotReplacePublishedData()
         try tests.testNonregularSourceIsRejectedWithoutWaitingForAWriter()
         tests.testPaceComparesUsageWithElapsedPeriodAtFetchTime()
+        tests.testProjectionNeedsElapsedTimeAndNeverPrecedesTheFetch()
         tests.testEndedPeriodHasNoPaceEvenWhenFetchedAtOrAfterReset()
         tests.testPaceCaptionsAndAllowanceNotes()
         try tests.testUnknownPeriodDegradesToNoPaceWithoutFailingDecode()
@@ -67,10 +70,20 @@ func XCTAssertThrowsError<T>(_ value: @autoclosure () throws -> T, file: StaticS
         tests.testBarAccessibilityValueRoundsLikeVisibleText()
         tests.testDeepLinkRoundTripsAndRejectsOtherPaths()
         try tests.testMissingFileIsDistinguishedFromOtherReadFailures()
-        print("35 BarsCore checks passed")
+        print("38 BarsCore checks passed")
     }
 }
 #endif
+
+/// The standard plugins' ids. The app names no provider; the checks use these to build fixtures.
+extension ProviderID {
+    static let claude = ProviderID(rawValue: "claude")!
+    static let codex = ProviderID(rawValue: "codex")!
+    static let cursor = ProviderID(rawValue: "cursor")!
+    static let devin = ProviderID(rawValue: "devin")!
+    static let standard: [ProviderID] = [.claude, .codex, .cursor, .devin]
+    var displayName: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+}
 
 final class SnapshotTests: XCTestCase {
     private let now = SnapshotDate.parse("2026-10-01T12:00:00Z")!
@@ -83,34 +96,30 @@ final class SnapshotTests: XCTestCase {
                             used: 20, limit: 100, remaining: 80,
                             resetsAt: now.addingTimeInterval(86_400), period: mid == short ? nil : "week")
             }
+            // The plugin names the secondary allowances; the reader resolves them in that order.
             var provider = ProviderSnapshot(id: id, name: id.displayName, status: .ok, message: nil,
-                                            fetchedAt: now, lastAttemptAt: now, primaryMetricId: short, metrics: metrics)
+                                            fetchedAt: now, lastAttemptAt: now, primaryMetricId: short,
+                                            secondaryMetricIds: [weekly], metrics: metrics)
             XCTAssertEqual(provider.primaryMetric?.id, short)
             XCTAssertEqual(provider.primaryMetric?.fill, 0.2)
             XCTAssertNil(UsagePresentation.pace(for: metrics[0], provider: provider, at: now))
             XCTAssertEqual(UsagePresentation.secondaryMetrics(for: provider).map(\.id), [weekly])
             XCTAssertEqual(UsagePresentation.scopeGroups(for: provider).flatMap(\.metrics).count, 3)
-            provider.primaryMetricId = weekly
-            provider.metrics.removeFirst()
-            XCTAssertEqual(provider.primaryMetric?.id, weekly)
+            // A secondary id without a metric resolves to nothing rather than a placeholder.
+            provider.metrics.remove(at: 1)
             XCTAssertTrue(UsagePresentation.secondaryMetrics(for: provider).isEmpty)
-            provider.primaryMetricId = nil
-            XCTAssertTrue(UsagePresentation.secondaryMetrics(for: provider).isEmpty)
-            // Adding quota data must not change the monthly overview layout.
-            let budget = UsageMetric(id: "monthly", label: "Monthly budget", kind: .budget, scope: .individual,
-                                     unit: "credits", used: 10, limit: 100, remaining: 90, resetsAt: nil)
-            provider.metrics.append(budget)
-            provider.primaryMetricId = budget.id
+            provider.secondaryMetricIds = []
             XCTAssertTrue(UsagePresentation.secondaryMetrics(for: provider).isEmpty)
         }
     }
 
     private func fixture() -> [String: Any] {
-        ["schema_version": 1, "generated_at": "2026-10-01T12:00:00.123Z",
-         "providers": ProviderID.allCases.map { id -> [String: Any] in
+        ["schema_version": 2, "generated_at": "2026-10-01T12:00:00.123Z",
+         "providers": ProviderID.standard.map { id -> [String: Any] in
             ["id": id.rawValue, "name": id.displayName, "status": "ok", "message": NSNull(),
              "fetched_at": "2026-10-01T11:00:00Z", "last_attempt_at": "2026-10-01T12:00:00Z",
-             "primary_metric_id": "main", "metrics": [
+             "primary_metric_id": "main", "secondary_metric_ids": [], "usage_url": NSNull(), "setup": NSNull(),
+             "metrics": [
                 ["id": "main", "label": "Monthly budget", "kind": "budget", "scope": "individual",
                  "unit": "USD", "used": 120, "limit": 100, "remaining": 0, "resets_at": NSNull()]
              ]]
@@ -252,23 +261,150 @@ final class SnapshotTests: XCTestCase {
 
     func testRejectsUnsupportedSchemaMissingProvidersAndDanglingPrimary() throws {
         var value = fixture()
-        value["schema_version"] = 2
-        XCTAssertThrowsError(try decode(value))
-        // A newer schema says so even when its shape no longer decodes as version 1.
+        value["schema_version"] = 1
+        // The file left by the previous version, in the moments after an update.
         do {
-            _ = try UsageSnapshot.decode(Data(#"{"schema_version": 2, "providers": {}}"#.utf8))
+            _ = try decode(value)
+            XCTAssertTrue(false)
+        } catch {
+            XCTAssertEqual(error as? SnapshotError, .outdatedVersion)
+        }
+        // A newer schema says so even when its shape no longer decodes as version 2.
+        do {
+            _ = try UsageSnapshot.decode(Data(#"{"schema_version": 3, "providers": {}}"#.utf8))
             XCTAssertTrue(false)
         } catch {
             XCTAssertEqual(error as? SnapshotError, .unsupportedVersion)
         }
+        // Any set of plugins is valid, including none, but ids must be unique, ascending and well formed.
         value = fixture()
         value["providers"] = []
-        XCTAssertThrowsError(try decode(value))
+        XCTAssertEqual(try decode(value).providers.count, 0)
         value = fixture()
         var providers = value["providers"] as! [[String: Any]]
+        providers.swapAt(0, 1)
+        value["providers"] = providers
+        XCTAssertThrowsError(try decode(value))
+        providers = fixture()["providers"] as! [[String: Any]]
+        providers[1]["id"] = "claude"
+        value["providers"] = providers
+        XCTAssertThrowsError(try decode(value))
+        for bad in ["Claude", "my-plugin", "../x", "", String(repeating: "a", count: 33)] {
+            providers = fixture()["providers"] as! [[String: Any]]
+            providers[3]["id"] = bad
+            value["providers"] = providers
+            XCTAssertThrowsError(try decode(value))
+        }
+        providers = fixture()["providers"] as! [[String: Any]]
+        providers[3]["id"] = "zeta_2"
+        value["providers"] = providers
+        XCTAssertEqual(try decode(value).providers.last?.id.rawValue, "zeta_2")
+        // Dangling primary or secondary ids, or a primary repeated as secondary, are rejected.
+        providers = fixture()["providers"] as! [[String: Any]]
         providers[0]["primary_metric_id"] = "missing"
         value["providers"] = providers
         XCTAssertThrowsError(try decode(value))
+        providers = fixture()["providers"] as! [[String: Any]]
+        providers[0]["secondary_metric_ids"] = ["missing"]
+        value["providers"] = providers
+        XCTAssertThrowsError(try decode(value))
+        providers = fixture()["providers"] as! [[String: Any]]
+        providers[0]["secondary_metric_ids"] = ["main"]
+        value["providers"] = providers
+        XCTAssertThrowsError(try decode(value))
+    }
+
+    func testPublisherEnforcesContractBoundsOnLinksMetricsAndText() throws {
+        func mutated(_ change: (inout [String: Any]) -> Void) -> [String: Any] {
+            var value = fixture()
+            var providers = value["providers"] as! [[String: Any]]
+            change(&providers[0])
+            value["providers"] = providers
+            return value
+        }
+        // Links must be absolute https with a host, or the file is refused.
+        for link in ["file:///tmp/example", "bars://provider/example", "relative/path", "https://", "http://example.com",
+                     "https://user:pw@example.com/"] {
+            XCTAssertThrowsError(try decode(mutated { $0["usage_url"] = link }))
+            XCTAssertThrowsError(try decode(mutated {
+                $0["setup"] = ["install_title": "Install", "install_url": link, "login_command": "x login",
+                               "login_step": "Sign in:", "sign_in_again": "Again:", "credential_note": "Note."]
+            }))
+        }
+        XCTAssertEqual(try decode(mutated { $0["usage_url"] = "https://example.com/usage" }).providers[0].usageUrl?.host, "example.com")
+        // Metric count, id grammar and printable bounded text.
+        let metric = (fixture()["providers"] as! [[String: Any]])[0]["metrics"] as! [[String: Any]]
+        XCTAssertThrowsError(try decode(mutated { provider in
+            provider["metrics"] = (0..<(UsageSnapshot.maximumMetrics + 1)).map { index -> [String: Any] in
+                var copy = metric[0]; copy["id"] = "m\(index)"; return copy
+            }
+            provider["primary_metric_id"] = "m0"
+        }))
+        XCTAssertEqual(try decode(mutated { provider in
+            provider["metrics"] = (0..<UsageSnapshot.maximumMetrics).map { index -> [String: Any] in
+                var copy = metric[0]; copy["id"] = "m\(index)"; return copy
+            }
+            provider["primary_metric_id"] = "m0"
+        }).providers[0].metrics.count, UsageSnapshot.maximumMetrics)
+        for badID in ["../bad", "Main", "", String(repeating: "a", count: 65)] {
+            XCTAssertThrowsError(try decode(mutated { provider in
+                var copy = metric[0]; copy["id"] = badID
+                provider["metrics"] = [copy]; provider["primary_metric_id"] = badID
+            }))
+        }
+        for badText in ["", "line\nbreak", "tab\tbed", String(repeating: "x", count: 201)] {
+            XCTAssertThrowsError(try decode(mutated { provider in
+                var copy = metric[0]; copy["note"] = badText; provider["metrics"] = [copy]
+            }))
+            XCTAssertThrowsError(try decode(mutated { provider in
+                var copy = metric[0]; copy["label"] = badText; provider["metrics"] = [copy]
+            }))
+            XCTAssertThrowsError(try decode(mutated { $0["message"] = badText }))
+        }
+        XCTAssertThrowsError(try decode(mutated { $0["name"] = String(repeating: "n", count: 33) }))
+        // An unreadable file keeps its reason apart from an empty plugin list.
+        let unavailable = UsageSnapshot.unavailable(message: "Open Bars to collect usage.")
+        XCTAssertEqual(unavailable.unavailableMessage, "Open Bars to collect usage.")
+        XCTAssertNil(try decode(mutated { _ in }).unavailableMessage)
+    }
+
+    func testManifestFieldsDecodeAndDegradeWhenAbsent() throws {
+        var value = fixture()
+        var providers = value["providers"] as! [[String: Any]]
+        providers[0]["usage_url"] = "https://example.com/usage"
+        providers[0]["setup"] = ["install_title": "Install Example", "install_url": "https://example.com/install",
+                                 "login_command": "example login", "login_step": "Sign in:",
+                                 "sign_in_again": "Sign in again:", "credential_note": "Bars reads the Example login."]
+        var metrics = providers[0]["metrics"] as! [[String: Any]]
+        metrics[0]["resets_at"] = "2026-11-01T00:00:00Z"
+        metrics[0]["resets_at_estimated"] = true
+        metrics[0]["note"] = "Example reports only the remaining amount."
+        providers[0]["metrics"] = metrics
+        // A provider written by an older version 2 collector omits the newer keys entirely.
+        for key in ["secondary_metric_ids", "usage_url", "setup"] { providers[1].removeValue(forKey: key) }
+        value["providers"] = providers
+        let snapshot = try decode(value)
+        XCTAssertEqual(snapshot.providers[0].usageUrl, URL(string: "https://example.com/usage"))
+        XCTAssertEqual(snapshot.providers[0].setup?.loginCommand, "example login")
+        XCTAssertEqual(snapshot.providers[0].setup?.installUrl, URL(string: "https://example.com/install"))
+        XCTAssertTrue(snapshot.providers[0].metrics[0].resetsAtEstimated)
+        XCTAssertEqual(snapshot.providers[0].metrics[0].note, "Example reports only the remaining amount.")
+        XCTAssertNil(snapshot.providers[1].usageUrl)
+        XCTAssertNil(snapshot.providers[1].setup)
+        XCTAssertEqual(snapshot.providers[1].secondaryMetricIds, [])
+        XCTAssertFalse(snapshot.providers[1].metrics[0].resetsAtEstimated)
+        // The "(est.)" marker follows the flag, not the absence of a reset.
+        let locale = Locale(identifier: "en_US@calendar=gregorian")
+        let zone = TimeZone(identifier: "America/Los_Angeles")!
+        let estimated = snapshot.providers[0]
+        XCTAssertEqual(UsagePresentation.fullResetText(for: estimated.metrics[0], provider: estimated,
+                                                       locale: locale, timeZone: zone)?
+                           .replacingOccurrences(of: "\u{202f}", with: " "),
+                       "Oct 31 at 5:00 PM PDT (est.)")
+        XCTAssertEqual(UsagePresentation.balanceNote(for: estimated.metrics[0], provider: estimated),
+                       "Example reports only the remaining amount.")
+        XCTAssertEqual(UsagePresentation.balanceNote(for: snapshot.providers[1].metrics[0], provider: snapshot.providers[1]),
+                       "Codex reports only the remaining amount.")
     }
 
     func testFailedPublishPreservesPreviousSnapshot() throws {
@@ -298,7 +434,8 @@ final class SnapshotTests: XCTestCase {
                         remaining: max(limit - used, 0), resetsAt: cursorReset, period: "month")
         }
         let cursor = ProviderSnapshot(id: .cursor, name: "Cursor", status: .ok, message: nil, fetchedAt: fetched,
-                                      lastAttemptAt: fetched, primaryMetricId: "included", metrics: [
+                                      lastAttemptAt: fetched, primaryMetricId: "included",
+                                      secondaryMetricIds: ["individual_on_demand", "team_on_demand"], metrics: [
             cursorMetric("included", "Included usage", .individual, used: 100, limit: 100),
             cursorMetric("individual_on_demand", "Individual on-demand", .individual, used: 12.5, limit: 400),
             cursorMetric("team_on_demand", "Team on-demand", .team, used: 75, limit: 3_000),
@@ -329,9 +466,11 @@ final class SnapshotTests: XCTestCase {
 
     private func devinProvider(fetched: Date, dailyUsed: Double = 0) -> ProviderSnapshot {
         ProviderSnapshot(id: .devin, name: "Devin", status: .ok, message: nil, fetchedAt: fetched,
-                         lastAttemptAt: fetched, primaryMetricId: "on_demand_balance", metrics: [
+                         lastAttemptAt: fetched, primaryMetricId: "on_demand_balance",
+                         secondaryMetricIds: ["daily", "weekly"], metrics: [
             UsageMetric(id: "on_demand_balance", label: "On-demand balance", kind: .balance, scope: .team, unit: "USD",
-                        used: nil, limit: nil, remaining: 2_500, resetsAt: nil, period: nil),
+                        used: nil, limit: nil, remaining: 2_500, resetsAt: nil, period: nil,
+                        note: "Devin reports only the remaining amount; purchased credits do not expire, so there is no reset."),
             UsageMetric(id: "daily", label: "Daily quota", kind: .quota, scope: .unknown, unit: "%", used: dailyUsed,
                         limit: 100, remaining: 100 - dailyUsed, resetsAt: SnapshotDate.parse("2026-10-03T08:00:00Z"),
                         period: "day"),
@@ -340,11 +479,14 @@ final class SnapshotTests: XCTestCase {
         ])
     }
 
-    private func monthlyProvider(_ id: ProviderID, fetched: String, reset: String? = nil) -> ProviderSnapshot {
+    /// A monthly budget. The Claude plugin estimates a missing reset as the end of the UTC month
+    /// and marks it; the reader shows whatever reset the snapshot carries.
+    private func monthlyProvider(_ id: ProviderID, fetched: String, reset: String? = nil,
+                                 estimated: Bool = false) -> ProviderSnapshot {
         let date = SnapshotDate.parse(fetched)!
         let metric = UsageMetric(id: "monthly_spend", label: "Monthly budget", kind: .budget,
                                  scope: .unknown, unit: "USD", used: 10, limit: 100, remaining: 90,
-                                 resetsAt: reset.flatMap(SnapshotDate.parse))
+                                 resetsAt: reset.flatMap(SnapshotDate.parse), period: "month", resetsAtEstimated: estimated)
         return ProviderSnapshot(id: id, name: id.displayName, status: .ok, message: nil,
                                 fetchedAt: date, lastAttemptAt: date, primaryMetricId: metric.id, metrics: [metric])
     }
@@ -354,32 +496,37 @@ final class SnapshotTests: XCTestCase {
         // these dates in it, which is correct behavior for the app but not what this test checks.
         let locale = Locale(identifier: "en_US@calendar=gregorian")
         let zone = TimeZone(identifier: "America/Los_Angeles")!
-        for id in ProviderID.allCases {
+        for id in ProviderID.standard {
             let provider = monthlyProvider(id, fetched: "2026-10-01T12:00:00Z",
-                                           reset: id == .claude ? nil : "2026-11-01T00:00:00Z")
+                                           reset: "2026-11-01T00:00:00Z", estimated: id == .claude)
             let caption = UsagePresentation.fullResetText(for: provider.metrics[0], provider: provider,
                                                           locale: locale, timeZone: zone)!
                 .replacingOccurrences(of: "\u{202f}", with: " ")
             XCTAssertEqual(caption, "Oct 31 at 5:00 PM PDT" + (id == .claude ? " (est.)" : ""))
         }
         // The UTC month has rolled over while the local date is still October 31.
-        let november = monthlyProvider(.claude, fetched: "2026-11-01T00:30:00Z")
+        let november = monthlyProvider(.claude, fetched: "2026-11-01T00:30:00Z", reset: "2026-12-01T00:00:00Z", estimated: true)
         let caption = UsagePresentation.fullResetText(for: november.metrics[0], provider: november,
                                                       locale: locale, timeZone: zone)!
             .replacingOccurrences(of: "\u{202f}", with: " ")
         XCTAssertEqual(caption, "Nov 30 at 4:00 PM PST (est.)")
     }
 
-    func testEstimatedResetUsesUTCMonthAndRetainsStalePeriod() {
-        for (fetched, expected) in [("2026-12-31T23:59:00Z", "2027-01-01T00:00:00Z"),
-                                    ("2028-02-29T12:00:00Z", "2028-03-01T00:00:00Z")] {
-            let provider = monthlyProvider(.claude, fetched: fetched)
-            let reset = SnapshotDate.parse(expected)!
-            XCTAssertEqual(UsagePresentation.resetDate(for: provider.metrics[0], provider: provider), reset)
+    func testReadersNeverInventAResetAndEstimatesRetainStalePeriod() {
+        // An estimated reset behaves like a reported one for period membership and pace, and
+        // without any reset the reader invents none.
+        for reset in ["2027-01-01T00:00:00Z", "2028-03-01T00:00:00Z"] {
+            let provider = monthlyProvider(.claude, fetched: "2026-12-31T23:59:00Z", reset: reset, estimated: true)
+            let date = SnapshotDate.parse(reset)!
+            XCTAssertEqual(UsagePresentation.resetDate(for: provider.metrics[0], provider: provider), date)
             XCTAssertFalse(UsagePresentation.isPreviousPeriod(for: provider.metrics[0], provider: provider,
-                                                              at: reset.addingTimeInterval(-1)))
-            XCTAssertTrue(UsagePresentation.isPreviousPeriod(for: provider.metrics[0], provider: provider, at: reset))
+                                                              at: date.addingTimeInterval(-1)))
+            XCTAssertTrue(UsagePresentation.isPreviousPeriod(for: provider.metrics[0], provider: provider, at: date))
         }
+        let none = monthlyProvider(.claude, fetched: "2026-10-01T12:00:00Z")
+        XCTAssertNil(UsagePresentation.resetDate(for: none.metrics[0], provider: none))
+        XCTAssertNil(UsagePresentation.fullResetText(for: none.metrics[0], provider: none))
+        XCTAssertFalse(UsagePresentation.isPreviousPeriod(for: none.metrics[0], provider: none, at: now.addingTimeInterval(86_400 * 60)))
         let reported = monthlyProvider(.claude, fetched: "2026-10-01T12:00:00Z", reset: "2026-10-15T08:00:00Z")
         XCTAssertEqual(UsagePresentation.resetDate(for: reported.metrics[0], provider: reported),
                        SnapshotDate.parse("2026-10-15T08:00:00Z"))
@@ -411,9 +558,9 @@ final class SnapshotTests: XCTestCase {
         let later = UsagePresentation.pace(for: codex.metrics[0], provider: codex, at: now.addingTimeInterval(86_400 * 30))!
         XCTAssertEqual(later.elapsedShare, 0.5)
 
-        // Claude's estimated month boundary supplies both the reset and the period start.
+        // Claude's estimated month boundary, written by its plugin, supplies both the reset and the period start.
         let claude = pacedProvider(.claude, metricId: "monthly_spend", used: 90, limit: 2_000, period: "month",
-                                   fetched: "2026-10-01T20:30:00Z", reset: nil)
+                                   fetched: "2026-10-01T20:30:00Z", reset: "2026-11-01T00:00:00Z")
         let early = UsagePresentation.pace(for: claude.metrics[0], provider: claude, at: now)!
         XCTAssertEqual(early.standing, .ahead)
         XCTAssertEqual(early.periodStart, SnapshotDate.parse("2026-10-01T00:00:00Z")!)
@@ -439,6 +586,34 @@ final class SnapshotTests: XCTestCase {
         let idle = UsagePresentation.pace(for: noUsage.metrics[0], provider: noUsage, at: now)!
         XCTAssertNil(idle.projectedExhaustion)
         XCTAssertEqual(idle.standing, .onPace)
+    }
+
+    func testProjectionNeedsElapsedTimeAndNeverPrecedesTheFetch() {
+        let locale = Locale(identifier: "en_US")
+        let zone = TimeZone(identifier: "America/Los_Angeles")!
+        // Fetched before the derived period start (a billing cycle end minus a calendar month can
+        // land after the fetch): usage with no elapsed time is ahead of pace but has no rate.
+        let early = pacedProvider(.cursor, metricId: "included", used: 5, limit: 100, period: "month",
+                                  fetched: "2026-09-30T10:00:00Z", reset: "2026-10-30T16:43:25Z")
+        let pace = UsagePresentation.pace(for: early.metrics[0], provider: early, at: SnapshotDate.parse("2026-09-30T11:00:00Z")!)!
+        XCTAssertEqual(pace.elapsedShare, 0)
+        XCTAssertEqual(pace.standing, .ahead)
+        XCTAssertNil(pace.projectedExhaustion)
+        XCTAssertEqual(UsagePresentation.paceCaption(for: pace, period: .month, locale: locale, timeZone: zone), "Ahead of pace")
+        // A projection is never earlier than the fetch that produced it.
+        let fetchedAt = SnapshotDate.parse("2026-10-16T12:00:00Z")!
+        let heavy = pacedProvider(.codex, used: 99.999, limit: 100, period: "month",
+                                  fetched: "2026-10-16T12:00:00Z", reset: "2026-11-01T00:00:00Z")
+        let late = UsagePresentation.pace(for: heavy.metrics[0], provider: heavy, at: fetchedAt)!
+        XCTAssertTrue(late.projectedExhaustion! >= fetchedAt)
+        // Exhausted or over-limit usage has no projection; it is already used up.
+        for used in [100.0, 150.0] {
+            let done = pacedProvider(.codex, used: used, limit: 100, period: "month",
+                                     fetched: "2026-10-16T12:00:00Z", reset: "2026-11-01T00:00:00Z")
+            let usedUp = UsagePresentation.pace(for: done.metrics[0], provider: done, at: fetchedAt)!
+            XCTAssertEqual(usedUp.standing, .usedUp)
+            XCTAssertNil(usedUp.projectedExhaustion)
+        }
     }
 
     func testEndedPeriodHasNoPaceEvenWhenFetchedAtOrAfterReset() {
@@ -608,9 +783,13 @@ final class SnapshotTests: XCTestCase {
         let codex = pacedProvider(.codex, used: 10, period: "month", fetched: "2026-10-02T19:00:00Z",
                                   reset: "2026-11-01T00:00:00Z")
         XCTAssertEqual(short(codex.metrics[0], codex, capitalized: true), "Resets Oct 31")
-        // An unknown period also shows the date, and estimates stay marked.
-        let claude = monthlyProvider(.claude, fetched: "2026-10-02T19:00:00Z")
+        // Estimates stay marked.
+        let claude = monthlyProvider(.claude, fetched: "2026-10-02T19:00:00Z", reset: "2026-11-01T00:00:00Z", estimated: true)
         XCTAssertEqual(short(claude.metrics[0], claude, capitalized: true), "Resets Oct 31 (est.)")
+        // An unknown period also shows the date.
+        var unknownPeriod = claude
+        unknownPeriod.metrics[0].period = nil
+        XCTAssertEqual(short(unknownPeriod.metrics[0], unknownPeriod, capitalized: true), "Resets Oct 31 (est.)")
         let session = pacedProvider(.claude, metricId: "five_hour", used: 10, period: "five_hours",
                                     fetched: "2026-10-02T19:00:00Z", reset: "2026-10-02T22:30:00Z")
         XCTAssertEqual(short(session.metrics[0], session, capitalized: true), "Resets 3:30 PM")
@@ -796,21 +975,22 @@ final class SnapshotTests: XCTestCase {
         XCTAssertEqual(object.count, 6)
         XCTAssertTrue(String(decoding: hidden, as: UTF8.self).contains("\"/usr/bin:/bin\""))
 
-        // IDs stay unique and in contract order; hiding twice changes nothing.
+        // IDs stay unique; hiding twice changes nothing but moves the id to the end.
         let both = try InstallationSettings.updating(
             InstallationSettings.updating(hidden, provider: .cursor, hidden: true), provider: .devin, hidden: true)
         XCTAssertEqual(try settingsObject(both)["disabled_providers"] as? [String], ["cursor", "devin"])
         XCTAssertEqual(try InstallationSettings.disabledProviders(in: both), [.cursor, .devin])
 
-        // Showing removes only that ID and keeps IDs from a newer collector.
-        let future = Data(#"{"python": "/p", "disabled_providers": ["devin", "gemini", "cursor", "devin"]}"#.utf8)
+        // Showing removes only that ID and keeps every other entry, including ones for plugins
+        // this build has never seen and entries that are not valid ids.
+        let future = Data(#"{"python": "/p", "disabled_providers": ["devin", "gemini", "cursor", "devin", "Not-An-Id"]}"#.utf8)
         let shown = try InstallationSettings.updating(future, provider: .devin, hidden: false)
         object = try settingsObject(shown)
-        XCTAssertEqual(object["disabled_providers"] as? [String], ["cursor", "gemini"])
+        XCTAssertEqual(object["disabled_providers"] as? [String], ["gemini", "cursor", "Not-An-Id"])
         XCTAssertEqual(object["python"] as? String, "/p")
-        XCTAssertEqual(try InstallationSettings.disabledProviders(in: shown), [.cursor])
+        XCTAssertEqual(try InstallationSettings.disabledProviders(in: shown), [ProviderID(rawValue: "gemini")!, .cursor])
         let none = try InstallationSettings.updating(shown, provider: .cursor, hidden: false)
-        XCTAssertEqual(try settingsObject(none)["disabled_providers"] as? [String], ["gemini"])
+        XCTAssertEqual(try settingsObject(none)["disabled_providers"] as? [String], ["gemini", "Not-An-Id"])
 
         // Malformed settings are never rewritten.
         XCTAssertThrowsError(try InstallationSettings.updating(Data("[]".utf8), provider: .claude, hidden: true))
@@ -881,16 +1061,22 @@ final class SnapshotTests: XCTestCase {
     }
 
     func testDeepLinkRoundTripsAndRejectsOtherPaths() {
-        for id in ProviderID.allCases {
+        for id in ProviderID.standard + [ProviderID(rawValue: "my_plugin2")!] {
             XCTAssertEqual(id.deepLink.absoluteString, "bars://provider/\(id.rawValue)")
             XCTAssertEqual(ProviderID(deepLink: id.deepLink), id)
         }
         XCTAssertEqual(ProviderID(deepLink: URL(string: "bars://provider/cursor/")!), .cursor)
         for link in ["bars://provider/extra/cursor", "bars://provider/cursor/extra", "bars://provider/",
                      "bars://provider", "bars://settings/cursor", "https://provider/cursor",
-                     "bars://provider/Cursor", "bars:provider/cursor"] {
+                     "bars://provider/Cursor", "bars:provider/cursor", "bars://provider/my-plugin",
+                     "bars://provider/2fast", "bars://provider/%2e%2e"] {
             XCTAssertNil(ProviderID(deepLink: URL(string: link)!))
         }
+        // Only the collector's id grammar is accepted anywhere an id is parsed.
+        XCTAssertNil(ProviderID(rawValue: "Claude"))
+        XCTAssertNil(ProviderID(rawValue: ""))
+        XCTAssertNil(ProviderID(rawValue: String(repeating: "a", count: 33)))
+        XCTAssertEqual(ProviderID(rawValue: String(repeating: "a", count: 32))?.rawValue.count, 32)
     }
 
     func testMissingFileIsDistinguishedFromOtherReadFailures() throws {

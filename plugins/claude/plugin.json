@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "id": "claude",
+  "name": "Claude",
+  "usage_url": "https://claude.ai/settings/usage",
+  "setup": {
+    "install_title": "Install Claude Code",
+    "install_url": "https://code.claude.com/docs/en/overview",
+    "login_command": "claude",
+    "login_step": "Run Claude Code once in Terminal and sign in:",
+    "sign_in_again": "Run Claude Code in Terminal and sign in again. If it does not ask, type /login.",
+    "credential_note": "Bars reads the “Claude Code-credentials” Keychain entry that Claude Code saves."
+  }
+}

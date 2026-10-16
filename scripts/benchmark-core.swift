@@ -9,8 +9,8 @@ import Foundation
         let locale = Locale(identifier: "en_US")
         let timeZone = TimeZone(identifier: "America/Los_Angeles")!
         func fixture(_ count: Int) throws -> Data {
-            let providers = ProviderID.allCases.map { id -> [String: Any] in
-                ["id": id.rawValue, "name": id.displayName, "enabled": true, "status": "ok",
+            let providers = ["claude", "codex", "cursor", "devin"].map { id -> [String: Any] in
+                ["id": id, "name": id.capitalized, "enabled": true, "status": "ok",
                  "fetched_at": epoch, "last_attempt_at": epoch, "primary_metric_id": "metric0",
                  "metrics": (0..<count).map { index -> [String: Any] in
                      ["id": "metric\(index)", "label": "Monthly usage", "kind": "budget",
@@ -18,7 +18,7 @@ import Foundation
                       "remaining": 80.0, "resets_at": "2026-11-01T00:00:00.123456Z", "period": "month"]
                  }]
             }
-            return try JSONSerialization.data(withJSONObject: ["schema_version": 1, "generated_at": epoch,
+            return try JSONSerialization.data(withJSONObject: ["schema_version": UsageSnapshot.schemaVersion, "generated_at": epoch,
                                                                "providers": providers], options: [.sortedKeys])
         }
         func measure(_ name: String, iterations: Int, _ body: () throws -> Int) rethrows {
@@ -34,9 +34,9 @@ import Foundation
             print("\(name) iterations=\(iterations) median_ms=\(samples[samples.count / 2]) p95_ms=\(samples[min(samples.count - 1, Int(Double(samples.count) * 0.95))]) checksum=\(checksum)")
         }
         let normal = try fixture(3)
-        let large = try fixture(1100)
+        let large = try fixture(UsageSnapshot.maximumMetrics)
         let snapshot = try UsageSnapshot.decode(normal)
-        print("synthetic normal_bytes=\(normal.count) normal_metrics=12 large_bytes=\(large.count) large_metrics=4400")
+        print("synthetic normal_bytes=\(normal.count) normal_metrics=12 large_bytes=\(large.count) large_metrics=\(4 * UsageSnapshot.maximumMetrics)")
         try measure("normal_decode", iterations: 200) { try UsageSnapshot.decode(normal).providers.count }
         try measure("large_decode", iterations: 10) { try UsageSnapshot.decode(large).providers[0].metrics.count }
         measure("presentation_12_metrics", iterations: 200) {

@@ -210,7 +210,8 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(list(elsewhere.iterdir()), [])
 
     def test_invalid_install_options_fail_before_fetch_or_build(self):
-        for args in (("--disable", "unknown"), ("--disable",), ("--unknown",),
+        for args in (("--disable", "Not-Valid"), ("--disable", "../x"), ("--disable", "valid_id\nNot-Valid"),
+                     ("--disable", ""), ("--disable",), ("--unknown",),
                      ("--enable-all", "--disable", "cursor"), ("--keep-data",)):
             with self.subTest(args=args):
                 result = self.run_bootstrap(*args, BARS_REPO_URL="file:///nonexistent.git")

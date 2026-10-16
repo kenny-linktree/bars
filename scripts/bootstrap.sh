@@ -33,7 +33,7 @@ Usage: bootstrap.sh [--disable ID]... [--enable-all] [--no-start] [--build-only]
 Clones or updates Bars in ~/Library/Application Support/Bars/src, builds it with
 Apple's Command Line Tools and installs it. Other options go to scripts/install.py.
 
-  --disable ID   Disable a provider (claude, codex, cursor, devin). Repeatable.
+  --disable ID   Disable a provider plugin (claude, codex, cursor, devin or your own). Repeatable.
   --enable-all   Enable every provider. By default, providers without a local
                  login are disabled.
   --no-start     Install without starting the scheduled collector now.
@@ -84,10 +84,12 @@ check_install_arguments() {
       --disable)
         shift
         [ "$#" -gt 0 ] || fail "--disable needs a provider ID."
-        case $1 in
-          claude | codex | cursor | devin) has_disable=1 ;;
-          *) fail "Unknown provider ID: $1." ;;
-        esac ;;
+        # Any plugin id: lowercase letters, digits and underscores, starting with a letter.
+        # grep matches lines, so refuse an argument with a newline before asking it.
+        newline=$(printf '\nx'); newline=${newline%x}
+        case $1 in *"$newline"* | '') fail "Invalid provider ID." ;; esac
+        printf '%s\n' "$1" | LC_ALL=C grep -Eq '^[a-z][a-z0-9_]{0,31}$' || fail "Invalid provider ID: $1."
+        has_disable=1 ;;
       --enable-all) enable_all=1 ;;
       --no-start | --build-only) ;;
       *) fail "Unknown install option: $1." ;;

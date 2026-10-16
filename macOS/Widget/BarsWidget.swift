@@ -7,8 +7,9 @@ struct BarsEntry: TimelineEntry {
 }
 
 struct BarsTimelineProvider: TimelineProvider {
-    /// WidgetKit's own fallback reload, matching the 15-minute collection schedule. The publisher
-    /// requests a reload after every collection, so this matters only when such a request is missed.
+    /// WidgetKit's own fallback reload. Collection runs every minute, but the refresh runner asks
+    /// for a reload only when values changed (at most every five minutes) or every fifteen minutes,
+    /// because WidgetKit budgets reloads; this matters only when such a request is missed.
     static let fallbackReloadInterval: TimeInterval = 15 * 60
 
     func placeholder(in context: Context) -> BarsEntry {
@@ -65,6 +66,8 @@ struct BarsWidgetView: View {
     /// The largest gap above each row when providers are hidden, so fewer rows stay top-aligned
     /// with modest even gaps instead of spreading apart.
     private static let maximumRowGap: CGFloat = 14
+    /// Rows the large widget can hold without clipping; the overflow footer counts the rest.
+    static let maximumRows = UsageSnapshot.standardProviderCount
 
     /// Four rows keep uncapped gaps: a capped spacer changed how the stack shared the few spare
     /// points and shrank the header text in the 344 pt widget.
@@ -90,9 +93,12 @@ struct BarsWidgetView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
-            let providers = entry.snapshot.visibleProviders
+            // The large widget fits the standard four rows. With more plugins the first four, in
+            // snapshot order, are shown and a footer counts the rest; the dropdown shows them all.
+            let visible = entry.snapshot.visibleProviders
+            let providers = Array(visible.prefix(Self.maximumRows))
             ForEach(providers) { provider in
-                rowGap(capped: providers.count < ProviderID.allCases.count)
+                rowGap(capped: providers.count < UsageSnapshot.standardProviderCount)
                 Link(destination: provider.id.deepLink) {
                     ProviderRow(provider: provider, now: entry.date, compact: true, latestFetch: latest)
                         .fixedSize(horizontal: false, vertical: pinRowHeights)
@@ -101,9 +107,19 @@ struct BarsWidgetView: View {
                 .accessibilityHint("Opens \(provider.name) details in Bars")
                 .layoutPriority(1)
             }
+            if visible.count > providers.count {
+                Spacer(minLength: 3)
+                Text("\(visible.count - providers.count) more in Bars")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
             if providers.isEmpty {
                 Spacer(minLength: 12)
-                Text("Every provider is hidden. Open Bars from the menu bar to show one again.")
+                Text(entry.snapshot.unavailableMessage
+                     ?? (entry.snapshot.providers.isEmpty
+                         ? "No provider plugins are installed. Reinstall Bars or add a plugin."
+                         : "Every provider is hidden. Open Bars from the menu bar to show one again."))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
@@ -137,7 +153,7 @@ struct BarsWidgetView: View {
             BarsWidgetView(entry: entry)
         }
         .configurationDisplayName("Bars")
-        .description("Claude, Codex, Cursor and Devin usage, with pace against each allowance period.")
+        .description("AI provider usage, with pace against each allowance period.")
         .supportedFamilies([.systemLarge])
     }
 }

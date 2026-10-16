@@ -33,6 +33,8 @@ swiftc macOS/Shared/Snapshot.swift \
 
 The direct Swift command works with the Command Line Tools, which omit XCTest. The package also provides an XCTest path through `swift test` when full Xcode is selected; that path and the Xcode build have not been exercised yet. [Verification](verification.md) records tested results and remaining limits.
 
+The collector tests load the standard plugins from `plugins/` through `tests/collector/plugin_fixtures.py`, the same discovery the collector uses, and exercise each plugin's `parse` function with synthetic responses. `tests/collector/test_plugins.py` writes synthetic plugins into temporary directories to check discovery, the manifest rules and fault containment through real worker processes. The plugins directory passed to the collector or the tests is always a temporary or repository path, never the installed one.
+
 ## Preview renders
 
 App-icon artwork and its rebuild command are documented in [Meter artwork](../macOS/Artwork/README.md). The menu-bar symbol is drawn separately in `macOS/App/BarsIcon.swift`.
@@ -47,7 +49,7 @@ scripts/preview/render.sh --check                          # synthetic fixtures,
 scripts/preview/render.sh --help
 ```
 
-- Default variants are `stale`, `mixed` (failures and a login problem), `heavy` (high use), `previous` (retained values from an ended period), `empty` (first launch), `setup` (missing logins), `hidden` (disabled providers) and `subscription` (Claude and Codex quota-only accounts). These use fixed synthetic data. `--variant live` explicitly reads the published snapshot and is skipped when none exists. Live renders contain private usage figures and must not be committed or shared.
+- Default variants are `stale`, `mixed` (failures and a login problem), `heavy` (high use), `previous` (retained values from an ended period), `empty` (first launch), `setup` (missing logins), `hidden` (disabled providers), `subscription` (Claude and Codex quota-only accounts) and `many` (eight plugins, so the widget shows its overflow footer). These use fixed synthetic data. `--variant live` explicitly reads the published snapshot and is skipped when none exists. Live renders contain private usage figures and must not be committed or shared.
 - Surfaces are `widget`, `overview` and `details`. Files are named by surface, variant and appearance, such as `widget-heavy-dark.png` and `dropdown-overview-heavy-light.png`.
 - The widget canvas defaults to WidgetKit's large size of 360 × 376 pt. On the development machine (macOS 26) the installed large widget measured 344 × 344 pt, so pass `--widget-size 344x344` to check layout at that size.
 - `scripts/preview/harness/Mirrors.swift` copies the overview layout of `BarsDropdown`, because `macOS/App/BarsApp.swift`, which defines it, owns `@main` and the AppKit lifecycle. Keep the mirror in step with `BarsDropdown` by hand. The rows, bars and details inside it are the real shared views.
@@ -80,4 +82,8 @@ The collector and installer support Python 3.9 or later so that the Command Line
 
 ## Testing the installer
 
-Never point the real installer at temporary paths to test it: it stops the real LaunchAgent and registers a duplicate widget. Use the isolated fixtures in `tests/integration`, which mock system registration and `launchctl`, and a bare Git repository in a temporary directory for the bootstrap script (`BARS_REPO_URL=file:///…`), as `tests/integration/test_bootstrap.py` does.
+Never point the real installer at temporary paths to test it: it stops the real LaunchAgent and registers a duplicate widget. Use the isolated fixtures in `tests/integration`, which mock system registration and `launchctl`, and a bare Git repository in a temporary directory for the bootstrap script (`BARS_REPO_URL=file:///…`), as `tests/integration/test_bootstrap.py` does. The same fixtures cover plugin synchronization: `InstallationTransactionTests` installs into a temporary support directory and checks that edited standard plugin files are kept, unmodified ones replaced, and that the plugin files roll back with the rest of a failed install.
+
+## Developing a plugin
+
+A plugin's `plugin.py` is loaded only inside a worker process, so iterate with the standalone collector against a scratch output and plugins directory rather than the installed one (see [Trying a plugin](plugins.md#trying-a-plugin)). To develop a standard plugin in place, a symbolic link from `~/Library/Application Support/Bars/plugins/<id>` to a checkout directory works and is left alone by the installer, which warns about it on each update.

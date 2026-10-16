@@ -193,14 +193,17 @@ struct BarsDropdown: View {
                         .accessibilityHint("Shows \(provider.name) details")
                         if provider.id != visible.last?.id { Divider() }
                     }
-                    if visible.isEmpty {
-                        Text("Every provider is hidden. Show one below to see its usage.")
+                    // Before the first readable snapshot the storage message above already explains.
+                    if visible.isEmpty, model.storageError == nil || !model.snapshot.providers.isEmpty {
+                        Text(model.snapshot.providers.isEmpty
+                             ? "No provider plugins are installed. Reinstall Bars or add a plugin, then refresh."
+                             : "Every provider is hidden. Show one below to see its usage.")
                             .foregroundStyle(.secondary)
                     }
                     VStack(alignment: .leading, spacing: 8) {
                         HiddenProvidersLine(snapshot: model.snapshot) { model.setHidden(false, provider: $0) }
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
-                            Text("Updates about every 15 minutes while this Mac is awake. A provider shows its own time when it differs.")
+                            Text("Updates about every minute while this Mac is awake. A provider shows its own time when it differs.")
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 0)
                             Button("Quit Bars") { NSApp.terminate(nil) }

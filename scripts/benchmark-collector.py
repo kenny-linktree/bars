@@ -20,9 +20,12 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "collector"))
 
-from bars_collector.model import PROVIDERS, now  # noqa: E402
-from bars_collector.parsers import devin  # noqa: E402
+from bars_collector import plugins  # noqa: E402
+from bars_collector.model import now  # noqa: E402
 from bars_collector.runner import collect_results, run  # noqa: E402
+
+STANDARD = plugins.discover(ROOT / "plugins")
+devin = plugins.load_module("devin", ROOT / "plugins/devin" / plugins.MODULE_NAME).parse
 
 
 def synthetic_result():
@@ -74,7 +77,7 @@ def main():
         parser.error("--iterations must be between 1 and 100")
     directory = ROOT / ".build/benchmarks/collector"
     directory.mkdir(parents=True, exist_ok=True)
-    providers = list(PROVIDERS)
+    providers = [plugin.id for plugin in STANDARD]
     collectors = dict.fromkeys(providers, synthetic_result)
     output = {"python": sys.version.split()[0], "synthetic_only": True}
     output["four_spawned_workers"] = measure(
@@ -86,11 +89,11 @@ def main():
             stamp = now()
             values = ((pid, dict(status="ok", message=None, fetched_at=stamp,
                                  last_attempt_at=stamp, **synthetic_result())) for pid in providers)
-            run(path, providers, results=values)
+            run(path, providers, results=values, plugins=STANDARD)
 
         output["four_atomic_snapshot_writes"] = measure(args.iterations, persist)
         output["workers_and_persistence"] = measure(
-            args.iterations, lambda: run(path, providers, results=collect_results(providers, collectors=collectors)))
+            args.iterations, lambda: run(path, providers, results=collect_results(providers, collectors=collectors), plugins=STANDARD))
     stop = threading.Event()
     peak = []
     sampler = threading.Thread(target=sample_tree, args=(stop, peak))

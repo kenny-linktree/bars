@@ -7,19 +7,6 @@ enum DropdownLayout {
     static let size = CGSize(width: 440, height: 700)
 }
 
-extension ProviderID {
-    var usageURL: URL {
-        let address: String
-        switch self {
-        case .claude: address = "https://claude.ai/settings/usage"
-        case .codex: address = "https://chatgpt.com/codex/cloud/settings/analytics#usage"
-        case .cursor: address = "https://cursor.com/dashboard?tab=usage"
-        case .devin: address = "https://app.devin.ai/settings/usage"
-        }
-        return URL(string: address)!
-    }
-}
-
 struct ProviderDetails: View {
     let provider: ProviderSnapshot
     let now: Date
@@ -69,14 +56,17 @@ struct ProviderDetails: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Link(destination: provider.id.usageURL) {
-                HStack(spacing: 3) {
-                    Text("Open \(provider.name) usage")
-                    Image(systemName: "arrow.up.right")
+            // The usage page comes from the plugin manifest; a plugin without one has no link.
+            if let usageUrl = provider.usageUrl {
+                Link(destination: usageUrl) {
+                    HStack(spacing: 3) {
+                        Text("Open \(provider.name) usage")
+                        Image(systemName: "arrow.up.right")
+                    }
                 }
+                .font(.callout)
+                .accessibilityLabel("Open \(provider.name) usage, opens in your browser")
             }
-            .font(.callout)
-            .accessibilityLabel("Open \(provider.name) usage, opens in your browser")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -158,7 +148,7 @@ private struct MetricCard: View {
         }
     }
 
-    /// Devin's balance has no total or used amount, so it has no bar and no grid.
+    /// A balance has no total or used amount, so it has no bar and no grid.
     private var balance: some View {
         Group {
             HStack(alignment: .firstTextBaseline) {

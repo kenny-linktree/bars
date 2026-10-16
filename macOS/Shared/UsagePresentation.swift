@@ -139,8 +139,8 @@ enum UsagePresentation {
         snapshot.visibleProviders.compactMap(\.fetchedAt).max()
     }
 
-    /// Fetches this close to the latest one count as the same collection run. Providers in one run
-    /// finish within seconds of each other, and runs are 15 minutes apart.
+    /// Fetches this close to the latest one count as the same collection run. A run lasts at most
+    /// about a minute, including a provider's retries, and the next run starts a minute later.
     static let sharedFetchTolerance: TimeInterval = 60
 
     /// Resets this close together are the same boundary. Providers report one boundary per
@@ -198,14 +198,10 @@ enum UsagePresentation {
 
     // MARK: - Resets
 
+    /// The reset the plugin reported or estimated. Readers never invent one; a plugin that
+    /// estimates a reset marks it with `resetsAtEstimated`, which the captions show as "(est.)".
     static func resetDate(for metric: UsageMetric, provider: ProviderSnapshot) -> Date? {
-        if let reported = metric.resetsAt { return reported }
-        guard provider.id == .claude, metric.id == "monthly_spend",
-              let fetched = provider.fetchedAt else { return nil }
-        // Estimate from the documented UTC calendar month containing the data.
-        // Anchoring to the successful fetch keeps stale data in its original period.
-        // https://support.claude.com/en/articles/14782391-claude-enterprise-consumption-guide
-        return Calendar.utcGregorian.dateInterval(of: .month, for: fetched)?.end
+        metric.resetsAt
     }
 
     static func isPreviousPeriod(for metric: UsageMetric, provider: ProviderSnapshot, at now: Date) -> Bool {
@@ -219,7 +215,7 @@ enum UsagePresentation {
     static func fullResetText(for metric: UsageMetric, provider: ProviderSnapshot, locale: Locale = .current,
                               timeZone: TimeZone = .current) -> String? {
         guard let reset = resetDate(for: metric, provider: provider) else { return nil }
-        return fullResetText(reset, estimated: metric.resetsAt == nil, locale: locale, timeZone: timeZone)
+        return fullResetText(reset, estimated: metric.resetsAtEstimated, locale: locale, timeZone: timeZone)
     }
 
     private static func fullResetText(_ reset: Date, estimated: Bool, locale: Locale, timeZone: TimeZone) -> String {
@@ -242,7 +238,7 @@ enum UsagePresentation {
         }
         var verb = isPreviousPeriod(for: metric, provider: provider, at: now) ? "reset" : "resets"
         if capitalized { verb = verb.prefix(1).uppercased() + verb.dropFirst() }
-        let estimate = metric.resetsAt == nil ? " (est.)" : ""
+        let estimate = metric.resetsAtEstimated ? " (est.)" : ""
         return "\(verb) \(reset.formatted(style))\(estimate)"
     }
 
@@ -272,7 +268,7 @@ enum UsagePresentation {
     static func sharedResetCaption(for provider: ProviderSnapshot, locale: Locale = .current,
                                    timeZone: TimeZone = .current) -> String? {
         guard let reset = sharedReset(for: provider) else { return nil }
-        let estimated = provider.metrics.contains { $0.resetsAt == nil }
+        let estimated = provider.metrics.contains(where: \.resetsAtEstimated)
         return "All allowances reset \(fullResetText(reset, estimated: estimated, locale: locale, timeZone: timeZone))"
     }
 
@@ -280,8 +276,13 @@ enum UsagePresentation {
 
     /// Pace needs a known limit, usage, period length, reset instant and fetch time. Data retained
     /// from an ended period has no pace, because the comparison would describe a finished period.
+    ///
+    /// The elapsed share is measured at the fetch, so usage and time describe the same instant and
+    /// the rate is a real one. A projection exists only when some of the period had elapsed at the
+    /// fetch: with no elapsed time there is no rate, so no "runs out at" time, rather than the start
+    /// of the period masquerading as one. Projections never land before the fetch itself.
     static func pace(for metric: UsageMetric, provider: ProviderSnapshot, at now: Date) -> UsagePace? {
-        guard let used = metric.used, let limit = metric.limit, limit > 0,
+        guard let used = metric.used, let limit = metric.limit, limit > 0, used.isFinite, used >= 0,
               let period = metric.allowancePeriod, let fetched = provider.fetchedAt,
               let end = resetDate(for: metric, provider: provider),
               let start = period.start(endingAt: end), start < end,
@@ -290,8 +291,8 @@ enum UsagePresentation {
         let length = end.timeIntervalSince(start)
         let elapsed = min(max(fetched.timeIntervalSince(start), 0), length)
         var projected: Date?
-        if used > 0 {
-            projected = start.addingTimeInterval(elapsed * (limit / used))
+        if used > 0 && elapsed > 0 && used < limit {
+            projected = max(start.addingTimeInterval(elapsed * (limit / used)), fetched)
         }
         return UsagePace(usedShare: used / limit, elapsedShare: elapsed / length,
                          periodStart: start, periodEnd: end, projectedExhaustion: projected)
@@ -344,18 +345,9 @@ enum UsagePresentation {
 
     // MARK: - Secondary allowances
 
+    /// The plugin chooses which allowances appear as mini bars; the reader only resolves them.
     static func secondaryMetrics(for provider: ProviderSnapshot) -> [UsageMetric] {
-        switch provider.id {
-        case .devin: return provider.metrics.filter { $0.kind == .quota }
-        case .cursor: return provider.metrics.filter { ["individual_on_demand", "team_on_demand"].contains($0.id) }
-        case .claude, .codex:
-            // Quota-only accounts show the other general window without repeating the
-            // primary bar. Model-specific limits stay in details to keep the widget compact.
-            guard provider.primaryMetric?.kind == .quota else { return [] }
-            let windows = provider.id == .claude ? ["five_hour", "seven_day"]
-                : ["primary_window", "secondary_window"]
-            return provider.metrics.filter { windows.contains($0.id) && $0.id != provider.primaryMetricId }
-        }
+        provider.secondaryMetrics
     }
 
     static func secondaryAllowances(for provider: ProviderSnapshot, now: Date, locale: Locale = .current,
@@ -431,12 +423,10 @@ enum UsagePresentation {
         metric.kind == .balance && metric.used == nil && metric.limit == nil
     }
 
+    /// The plugin's own sentence about the balance when it supplies one, else a generic one.
     static func balanceNote(for metric: UsageMetric, provider: ProviderSnapshot) -> String {
         let shared = metric.scope == .team ? "Shared team balance. " : ""
-        if provider.id == .devin {
-            return "\(shared)Devin reports only the remaining amount; purchased credits do not expire, so there is no reset."
-        }
-        return "\(shared)\(provider.name) reports only the remaining amount."
+        return shared + (metric.note ?? "\(provider.name) reports only the remaining amount.")
     }
 }
 
