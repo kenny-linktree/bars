@@ -207,6 +207,12 @@ private struct MetricCard: View {
         if previous {
             Text("Previous period").font(.caption).foregroundStyle(.orange)
         }
+        if let note = metric.note {
+            Text(note)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private func row(_ label: String, _ value: String) -> some View {
