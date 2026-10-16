@@ -29,7 +29,7 @@ enum PreviewLayout {
     static let widgetContentMargin: CGFloat = 16
     static let widgetCornerRadius: CGFloat = 22
     /// The app's own fixed dropdown size.
-    static let dropdownSize = DropdownLayout.size
+    static let dropdownSize = CGSize(width: DropdownLayout.width, height: DropdownLayout.maxHeight)
 }
 
 @MainActor struct Renderer {
@@ -60,7 +60,7 @@ enum PreviewLayout {
                                               messages: variant.dropdownMessages)
                     let (image, size) = try hosted(view, appearance: appearance)
                     if size.height > PreviewLayout.dropdownSize.height {
-                        warn("dropdown-overview-\(suffix): content is \(Int(size.height)) pt tall; the real \(Int(PreviewLayout.dropdownSize.height)) pt dropdown scrolls")
+                        warn("dropdown-overview-\(suffix): content is \(Int(size.height)) pt tall; the dropdown scrolls past \(Int(PreviewLayout.dropdownSize.height)) pt")
                     }
                     written.append(try write(image, "dropdown-overview-\(suffix)"))
                 case .details:

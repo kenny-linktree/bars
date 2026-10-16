@@ -1,10 +1,24 @@
 import SwiftUI
 
 enum DropdownLayout {
-    /// The dropdown popover's fixed size. A fixed size keeps the popover from jumping as rows load
-    /// or change; taller content scrolls. Defined here rather than in BarsApp.swift so the preview
-    /// harness, which cannot compile that file, renders against the same value.
-    static let size = CGSize(width: 440, height: 700)
+    /// The dropdown popover's width, and the height range it fits its content within. Content
+    /// taller than `maxHeight` scrolls. Defined here rather than in BarsApp.swift so the preview
+    /// harness, which cannot compile that file, renders against the same values.
+    static let width: CGFloat = 440
+    static let minHeight: CGFloat = 120
+    static let maxHeight: CGFloat = 700
+    static let size = CGSize(width: width, height: maxHeight)
+
+    /// The popover height for content of the given height.
+    static func height(fitting contentHeight: CGFloat) -> CGFloat {
+        min(max(contentHeight, minHeight), maxHeight)
+    }
+}
+
+/// Reports the content's laid-out height so the popover can fit it.
+struct ContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 struct ProviderDetails: View {

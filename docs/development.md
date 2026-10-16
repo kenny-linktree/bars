@@ -53,7 +53,7 @@ scripts/preview/render.sh --help
 - Surfaces are `widget`, `overview` and `details`. Files are named by surface, variant and appearance, such as `widget-heavy-dark.png` and `dropdown-overview-heavy-light.png`.
 - The widget canvas defaults to WidgetKit's large size of 360 × 376 pt. On the development machine (macOS 26) the installed large widget measured 344 × 344 pt, so pass `--widget-size 344x344` to check layout at that size.
 - `scripts/preview/harness/Mirrors.swift` copies the overview layout of `BarsDropdown`, because `macOS/App/BarsApp.swift`, which defines it, owns `@main` and the AppKit lifecycle. Keep the mirror in step with `BarsDropdown` by hand. The rows, bars and details inside it are the real shared views.
-- The dropdown is a fixed 440 × 700 pt popover, and overview content taller than 700 pt scrolls. The harness fits each render to its content and prints a warning when the overview exceeds 700 pt.
+- The dropdown is a 440 pt wide popover that fits its content between 120 and 700 pt tall; taller content scrolls. The harness fits each render to its content and prints a warning when the overview exceeds 700 pt.
 - Renders are not hosted by WidgetKit. Desktop widget tinting, popover materials and WidgetKit's layout of relative-date text differ from the installed app.
 
 ## Swift checks without Xcode

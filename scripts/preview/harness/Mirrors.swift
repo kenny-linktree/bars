@@ -9,8 +9,8 @@ import SwiftUI
 // The provider rows, bars, hidden-provider line and details inside them are the real shared
 // views, so changes to those need no mirroring.
 
-/// The overview branch of `BarsDropdown`. The real dropdown wraps this in a `ScrollView` of the
-/// fixed `DropdownLayout.size`; the harness fits the height to the content instead, and its
+/// The overview branch of `BarsDropdown`. The real dropdown wraps this in a `ScrollView` that
+/// fits its content up to `DropdownLayout.maxHeight`; the harness fits the height to the content, and its
 /// buttons do nothing. Accessibility hints and keyboard shortcuts draw nothing, so they are omitted.
 /// `now` mirrors the model's display date, advanced only while the real dropdown is open.
 struct OverviewMirror: View {
