@@ -191,6 +191,9 @@ struct ProviderSnapshot: Codable, Identifiable, Equatable {
     var message: String?
     var fetchedAt: Date?
     var lastAttemptAt: Date?
+    /// While set and in the future, the provider's scheduled attempts are paused after a rate
+    /// limit; an explicit refresh still tries. Missing in older snapshots.
+    var nextAttemptAt: Date?
     var primaryMetricId: String?
     /// Metrics the overview shows as labeled mini bars beneath the primary bar, chosen by the
     /// plugin. Never includes the primary.
@@ -213,6 +216,8 @@ struct ProviderSnapshot: Codable, Identifiable, Equatable {
     var primaryMetric: UsageMetric? { metrics.first { $0.id == primaryMetricId } }
     var secondaryMetrics: [UsageMetric] { secondaryMetricIds.compactMap { id in metrics.first { $0.id == id } } }
     func isStale(at now: Date) -> Bool { Self.isStale(fetchedAt: fetchedAt, at: now) }
+    /// True while scheduled attempts are paused after a rate limit.
+    func isPausing(at now: Date) -> Bool { nextAttemptAt.map { $0 > now } ?? false }
 
     /// Data that never succeeded counts as stale.
     static func isStale(fetchedAt: Date?, at now: Date) -> Bool {
@@ -227,7 +232,7 @@ struct ProviderSnapshot: Codable, Identifiable, Equatable {
     }
 
     init(id: ProviderID, name: String, status: FetchStatus, message: String?, fetchedAt: Date?,
-         lastAttemptAt: Date?, primaryMetricId: String?, secondaryMetricIds: [String] = [],
+         lastAttemptAt: Date?, nextAttemptAt: Date? = nil, primaryMetricId: String?, secondaryMetricIds: [String] = [],
          metrics: [UsageMetric], enabled: Bool = true, usageUrl: URL? = nil, setup: ProviderSetupGuide? = nil) {
         self.id = id
         self.name = name
@@ -235,6 +240,7 @@ struct ProviderSnapshot: Codable, Identifiable, Equatable {
         self.message = message
         self.fetchedAt = fetchedAt
         self.lastAttemptAt = lastAttemptAt
+        self.nextAttemptAt = nextAttemptAt
         self.primaryMetricId = primaryMetricId
         self.secondaryMetricIds = secondaryMetricIds
         self.metrics = metrics
@@ -254,6 +260,7 @@ extension ProviderSnapshot {
         message = try container.decodeIfPresent(String.self, forKey: .message)
         fetchedAt = try container.decodeIfPresent(Date.self, forKey: .fetchedAt)
         lastAttemptAt = try container.decodeIfPresent(Date.self, forKey: .lastAttemptAt)
+        nextAttemptAt = try container.decodeIfPresent(Date.self, forKey: .nextAttemptAt)
         primaryMetricId = try container.decodeIfPresent(String.self, forKey: .primaryMetricId)
         secondaryMetricIds = try container.decodeIfPresent([String].self, forKey: .secondaryMetricIds) ?? []
         metrics = try container.decode([UsageMetric].self, forKey: .metrics)

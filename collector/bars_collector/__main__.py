@@ -43,6 +43,8 @@ def main(argv=None):
     parser.add_argument("--provider", type=provider_id, metavar="ID")
     parser.add_argument("--disable", action="append", type=provider_id, default=[], metavar="ID",
                         help="Skip this provider and mark it disabled in the snapshot. Repeatable.")
+    parser.add_argument("--respect-pauses", action="store_true",
+                        help="Skip providers pausing after a rate limit (scheduled runs); an explicit refresh does not.")
     parser.add_argument("--detect", action="store_true",
                         help="Print which providers have local login material as JSON, without network requests.")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
@@ -67,7 +69,7 @@ def main(argv=None):
     selected = [arguments.provider] if arguments.provider else ids
     try:
         snapshot = run(arguments.output.expanduser(), selected, arguments.timeout,
-                       disabled=arguments.disable, plugins=plugins)
+                       disabled=arguments.disable, plugins=plugins, respect_pauses=arguments.respect_pauses)
     except CollectionCancelled:
         print("Bars collection was stopped.", file=sys.stderr)
         return 143

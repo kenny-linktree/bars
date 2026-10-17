@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -315,6 +316,29 @@ class RunTests(unittest.TestCase):
         apply_result(snapshot, target["id"], dict(status="error", message="E" * 190, last_attempt_at="2026-10-02T00:00:00Z"))
         self.assertLessEqual(encoded_size(snapshot), MAX_SNAPSHOT_BYTES)
         self.assertEqual(target, retained)
+
+    def test_a_pausing_provider_is_skipped_by_scheduled_runs_only(self):
+        limited = ("from bars_plugin import CollectionError\ndef collect():\n"
+                   "    raise CollectionError('Provider rate limit reached. Collection will retry later.', retry_after=0)\n")
+        write_plugin(self.plugins_dir, "limited", module=limited)
+        write_plugin(self.plugins_dir, "fine", module=OK_PLUGIN)
+        snapshot = self.run_all(respect_pauses=True)
+        first = self.provider(snapshot, "limited")
+        self.assertEqual(first["status"], "error")
+        self.assertIsNotNone(first["next_attempt_at"])
+        self.assertEqual(self.provider(snapshot, "fine")["status"], "ok")
+        # The next scheduled run leaves the limited provider alone: same attempt time.
+        snapshot = self.run_all(respect_pauses=True)
+        self.assertEqual(self.provider(snapshot, "limited")["last_attempt_at"], first["last_attempt_at"])
+        self.assertNotEqual(self.provider(snapshot, "fine")["last_attempt_at"], None)
+        # An explicit refresh tries anyway and, limited again, doubles the pause.
+        time.sleep(1.1)  # timestamps have one-second resolution
+        snapshot = self.run_all(respect_pauses=False)
+        second = self.provider(snapshot, "limited")
+        self.assertNotEqual(second["last_attempt_at"], first["last_attempt_at"])
+        from bars_collector.model import parse_instant
+        self.assertEqual((parse_instant(second["next_attempt_at"]) - parse_instant(second["last_attempt_at"])).total_seconds(), 600)
+        load_snapshot(self.output)
 
     def test_results_touch_only_their_provider_entry(self):
         write_plugin(self.plugins_dir, "alpha", module=OK_PLUGIN)

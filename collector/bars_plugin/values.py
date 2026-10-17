@@ -19,12 +19,22 @@ _FRACTION = re.compile(r"([T ]\d{2}:\d{2}:\d{2})[.,](\d+)")
 _COMPACT_OFFSET = re.compile(r"([T ][\d:.]+[+-]\d{2})(\d{2})$")
 
 
-class CollectionError(Exception):
-    """A user-safe failure. `status` is `error`, `login_required` or `setup`."""
+# A rate limit's cooldown is bounded; a provider cannot park itself for longer than this.
+MAX_RETRY_AFTER = 24 * 3600
 
-    def __init__(self, message="Usage is temporarily unavailable.", status="error"):
+
+class CollectionError(Exception):
+    """A user-safe failure. `status` is `error`, `login_required` or `setup`.
+
+    `retry_after` marks a rate limit: the provider asked for a pause of that many seconds
+    (0 when it gave no usable figure). The worker does not retry such a failure within the
+    run, and the collector pauses the provider's scheduled attempts, for at least that long.
+    """
+
+    def __init__(self, message="Usage is temporarily unavailable.", status="error", retry_after=None):
         super().__init__(message)
         self.status = status
+        self.retry_after = None if retry_after is None else min(max(int(retry_after), 0), MAX_RETRY_AFTER)
 
 
 def now():

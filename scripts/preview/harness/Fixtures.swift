@@ -137,7 +137,14 @@ enum Fixtures {
 
     static func mixed(now: Date) -> UsageSnapshot {
         var snapshot = baseline(now: now)
-        snapshot.update(.claude) { $0.fetchedAt = now.addingTimeInterval(-120); $0.lastAttemptAt = $0.fetchedAt }
+        snapshot.update(.claude) {
+            // Rate limited two minutes ago; scheduled attempts pause until the provider's limit clears.
+            $0.status = .error
+            $0.message = "Provider rate limit reached. Collection will retry later."
+            $0.fetchedAt = now.addingTimeInterval(-6 * 60)
+            $0.lastAttemptAt = now.addingTimeInterval(-120)
+            $0.nextAttemptAt = now.addingTimeInterval(8 * 60)
+        }
         snapshot.update(.codex) {
             $0.status = .error
             $0.message = "Codex usage request failed with HTTP 503. Showing the last successful values."

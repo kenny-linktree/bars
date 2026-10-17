@@ -71,7 +71,8 @@ func XCTAssertThrowsError<T>(_ value: @autoclosure () throws -> T, file: StaticS
         tests.testDeepLinkRoundTripsAndRejectsOtherPaths()
         try tests.testMissingFileIsDistinguishedFromOtherReadFailures()
         tests.testCompactRowsCapSecondaryAllowances()
-        print("39 BarsCore checks passed")
+        try tests.testRateLimitPauseDecodesAndIsShownOnlyWhileItLasts()
+        print("40 BarsCore checks passed")
     }
 }
 #endif
@@ -1078,6 +1079,35 @@ final class SnapshotTests: XCTestCase {
         XCTAssertNil(ProviderID(rawValue: ""))
         XCTAssertNil(ProviderID(rawValue: String(repeating: "a", count: 33)))
         XCTAssertEqual(ProviderID(rawValue: String(repeating: "a", count: 32))?.rawValue.count, 32)
+    }
+
+    func testRateLimitPauseDecodesAndIsShownOnlyWhileItLasts() throws {
+        let locale = Locale(identifier: "en_US_POSIX")
+        let zone = TimeZone(identifier: "UTC")!
+        let json = """
+        {"schema_version": 2, "generated_at": "2026-10-01T12:05:00Z", "providers": [
+         {"id": "p", "name": "P", "status": "error", "message": "Provider rate limit reached. Collection will retry later.",
+          "fetched_at": "2026-10-01T12:00:00Z", "last_attempt_at": "2026-10-01T12:05:00Z",
+          "next_attempt_at": "2026-10-01T12:10:00Z", "primary_metric_id": null, "metrics": []}]}
+        """
+        let provider = try UsageSnapshot.decode(Data(json.utf8)).providers[0]
+        XCTAssertEqual(provider.nextAttemptAt, SnapshotDate.parse("2026-10-01T12:10:00Z"))
+        let during = SnapshotDate.parse("2026-10-01T12:07:00Z")!
+        let after = SnapshotDate.parse("2026-10-01T12:11:00Z")!
+        XCTAssertTrue(provider.isPausing(at: during))
+        XCTAssertFalse(provider.isPausing(at: after))
+        XCTAssertEqual(UsagePresentation.pauseText(for: provider, now: during, locale: locale, timeZone: zone)?
+                           .replacingOccurrences(of: "\u{202f}", with: " "), "retries 12:10 PM")
+        XCTAssertNil(UsagePresentation.pauseText(for: provider, now: after, locale: locale, timeZone: zone))
+        XCTAssertEqual(UsagePresentation.failedAttemptNote(for: provider, now: during, locale: locale, timeZone: zone)?
+                           .replacingOccurrences(of: "\u{202f}", with: " "),
+                       "Last attempt 12:05 PM hit the provider's rate limit · retries 12:10 PM")
+        // Older snapshots without the field decode with no pause.
+        var plain = provider
+        plain.nextAttemptAt = nil
+        XCTAssertFalse(plain.isPausing(at: during))
+        XCTAssertEqual(UsagePresentation.failedAttemptNote(for: plain, now: during, locale: locale, timeZone: zone)?
+                           .replacingOccurrences(of: "\u{202f}", with: " "), "Last attempt 12:05 PM did not succeed")
     }
 
     func testCompactRowsCapSecondaryAllowances() {

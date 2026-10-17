@@ -4,6 +4,8 @@ Credentials never enter a snapshot. The worker deadline in the collector also bo
 DNS resolution and servers that keep a socket alive without finishing a response.
 """
 
+from datetime import datetime, timezone
+import email.utils
 import http.client
 import json
 import os
@@ -215,6 +217,27 @@ def secure_destination(url):
     return parts.scheme == "http" and parts.hostname == "127.0.0.1"
 
 
+def retry_after_seconds(headers):
+    """The pause a `Retry-After` header asks for, in whole seconds; 0 when absent or unusable.
+
+    Accepts the delay-seconds and HTTP-date forms. A date in the past, a negative number
+    or anything else is 0, which the collector treats as "rate limited, pick the pause".
+    """
+    value = (headers.get("Retry-After") if headers is not None else None) or ""
+    value = value.strip()
+    if not value:
+        return 0
+    if value.isdigit():
+        return int(value)
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return 0
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0, int((when - datetime.now(timezone.utc)).total_seconds()))
+
+
 def http_json(url, headers, timeout=12):
     """One HTTPS GET returning a JSON object. Failures become fixed user-safe messages.
 
@@ -242,7 +265,8 @@ def http_json(url, headers, timeout=12):
         if code in (401, 403):
             raise CollectionError("Login required. Open the provider CLI to refresh its login.", "login_required") from None
         if code == 429:
-            raise CollectionError("Provider rate limit reached. Collection will retry later.") from None
+            raise CollectionError("Provider rate limit reached. Collection will retry later.",
+                                  retry_after=retry_after_seconds(error.headers)) from None
         if 300 <= code < 400:
             raise CollectionError("Provider redirected the request; Bars refused to follow it (HTTP %d)." % code) from None
         raise CollectionError("Provider request failed (HTTP %d)." % code) from None

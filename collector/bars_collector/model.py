@@ -2,6 +2,7 @@
 
 import copy
 import json
+from datetime import datetime, timedelta, timezone
 import re
 
 from bars_plugin.values import (KINDS, MAX_TEXT, METRIC_ID, PERIODS, SCOPES, STATUSES, CollectionError, now,
@@ -14,6 +15,12 @@ PLACEHOLDER_MESSAGE = "Waiting for first collection."
 # What a plugin's `collect()` may contribute to its provider entry; everything else comes
 # from the manifest, the runner or the retained entry.
 RESULT_FIELDS = ("primary_metric_id", "secondary_metric_ids", "metrics")
+# A rate-limited provider's scheduled attempts pause: this long after the first limit, twice
+# as long after each consecutive one, never longer than the cap, and never shorter than the
+# provider's own Retry-After. An explicit refresh ignores the pause.
+RATE_LIMIT_FIRST_PAUSE = 5 * 60
+RATE_LIMIT_MAX_PAUSE = 60 * 60
+MAX_RETRY_AFTER = 24 * 3600
 # Keeps any one plugin from growing the snapshot past the readers' 1 MiB bound.
 MAX_METRICS = 32
 # The readers and the collector both refuse a snapshot larger than this once written, so
@@ -127,6 +134,8 @@ def validate_provider(p):
         raise ValueError("Invalid provider state.")
     for field in ("fetched_at", "last_attempt_at"):
         _instant(p[field], "provider " + field)
+    # Older caches predate the rate-limit pause.
+    _instant(p.get("next_attempt_at"), "provider next_attempt_at")
     if p["message"] is not None:
         _short_text(p["message"], "provider message")
     if "enabled" in p and not isinstance(p["enabled"], bool):
@@ -170,10 +179,13 @@ def validate_result(value):
         expected = {"status", "message", "fetched_at", "last_attempt_at", *RESULT_FIELDS}
         if set(value) != expected:
             raise ValueError("Invalid worker result.")
-    elif set(value) != {"status", "message", "last_attempt_at"}:
+    elif set(value) - {"retry_after"} != {"status", "message", "last_attempt_at"}:
         raise ValueError("Invalid worker failure.")
+    if "retry_after" in value and (isinstance(value["retry_after"], bool) or not isinstance(value["retry_after"], int)
+                                   or not 0 <= value["retry_after"] <= MAX_RETRY_AFTER):
+        raise ValueError("Invalid worker retry hint.")
     probe = dict(id="probe", name="Probe", metrics=[], primary_metric_id=None, secondary_metric_ids=[])
-    probe.update(value)
+    probe.update({k: v for k, v in value.items() if k != "retry_after"})
     for key in ("fetched_at", "last_attempt_at", "message"):
         probe.setdefault(key, None)
     validate_provider(probe)
@@ -183,6 +195,37 @@ def validate_result(value):
                                            for m in value["metrics"]):
         raise ValueError("Successful result without quantities.")
     return value
+
+
+def parse_instant(value):
+    """A canonical snapshot timestamp as an aware datetime, or None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def rate_limit_pause(previous, retry_after, at):
+    """How long a rate-limited provider's scheduled attempts pause, in seconds.
+
+    The first pause is `RATE_LIMIT_FIRST_PAUSE`; while the previous pause is still fresh (its
+    end lies after the last attempt) each consecutive limit doubles it, up to the cap. The
+    provider's own `Retry-After`, when it gives one, is a floor, not a ceiling.
+    """
+    pause = RATE_LIMIT_FIRST_PAUSE
+    previous_end, previous_attempt = parse_instant(previous.get("next_attempt_at")), parse_instant(previous.get("last_attempt_at"))
+    if previous_end is not None and previous_attempt is not None and previous_end > previous_attempt:
+        pause = min(max(int((previous_end - previous_attempt).total_seconds()) * 2, RATE_LIMIT_FIRST_PAUSE),
+                    RATE_LIMIT_MAX_PAUSE)
+    return min(max(pause, retry_after or 0), MAX_RETRY_AFTER)
+
+
+def is_pausing(provider, at):
+    """True while the provider's scheduled attempts are paused for a rate limit."""
+    until = parse_instant(provider.get("next_attempt_at"))
+    return until is not None and until > at
 
 
 def validate_snapshot(snapshot):
@@ -208,6 +251,6 @@ def encoded_size(snapshot):
     return len(json.dumps(snapshot, ensure_ascii=True, allow_nan=False, separators=(",", ":"))) + 1
 
 
-__all__ = ["CollectionError", "MAX_SNAPSHOT_BYTES", "SCHEMA_VERSION", "apply_enabled", "empty_provider",
+__all__ = ["CollectionError", "MAX_SNAPSHOT_BYTES", "SCHEMA_VERSION", "apply_enabled", "empty_provider", "is_pausing", "rate_limit_pause",
            "encoded_size", "now", "reconcile", "upgrade_snapshot", "validate_provider", "validate_result",
            "validate_snapshot"]

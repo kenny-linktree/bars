@@ -646,6 +646,16 @@ sys.exit(refresh.main())
                                  str(self.directory), "--scheduled", "--jitter", "31"], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 2)
 
+    def test_only_scheduled_runs_ask_the_collector_to_respect_rate_limit_pauses(self):
+        self.script("""
+import json, pathlib, sys
+pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps({'argv': sys.argv[1:]}))
+""")
+        self.assertEqual(self.invoke("--scheduled", "--jitter", "0").returncode, 0)
+        self.assertIn("--respect-pauses", json.loads((self.directory / "snapshot.json").read_text())["argv"])
+        self.assertEqual(self.invoke().returncode, 0)
+        self.assertNotIn("--respect-pauses", json.loads((self.directory / "snapshot.json").read_text())["argv"])
+
     def test_scheduled_runs_throttle_widget_reloads_and_explicit_runs_do_not(self):
         self.script("""
 import json, pathlib, sys, time

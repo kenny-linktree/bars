@@ -65,6 +65,11 @@ def login_failure_counting(path):
     raise CollectionError("Login required.", "login_required")
 
 
+def rate_limited_counting(path):
+    count_attempt(path)
+    raise CollectionError("Provider rate limit reached. Collection will retry later.", retry_after=120)
+
+
 def child_command(pid_path):
     # The child ignores TERM so the forced process-group cleanup is exercised.
     return [sys.executable, "-c", "import os,signal,sys,time; "
@@ -248,6 +253,64 @@ class RuntimeTests(unittest.TestCase):
         # A rejected login is not transient: one attempt, no waiting.
         self.assertEqual(values["login"]["status"], "login_required")
         self.assertEqual(counts["login"].read_text(), "1")
+
+    def test_rate_limits_are_not_retried_within_a_run_and_carry_the_pause(self):
+        # Asking again is what a 429 forbids: one attempt, no waiting, and the provider's
+        # Retry-After travels with the failure so the collector can pause the provider.
+        count = Path(self.directory.name) / "limited.count"
+        started = time.monotonic()
+        values = dict(collect_results(["limited"], timeout=6,
+                                      collectors={"limited": functools.partial(rate_limited_counting, count)}))
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(count.read_text(), "1")
+        self.assertEqual(values["limited"]["status"], "error")
+        self.assertEqual(values["limited"]["retry_after"], 120)
+        from bars_collector.model import validate_result
+        validate_result(values["limited"])
+        for bad in (-1, 10 ** 9, True, "60"):
+            with self.assertRaises(ValueError):
+                validate_result({"status": "error", "message": "x", "last_attempt_at": "2026-10-01T00:00:00Z", "retry_after": bad})
+
+    def test_rate_limit_pauses_escalate_and_a_success_clears_them(self):
+        from datetime import datetime, timezone
+        from bars_collector.model import RATE_LIMIT_FIRST_PAUSE, RATE_LIMIT_MAX_PAUSE, is_pausing, rate_limit_pause
+        from bars_collector.runner import apply_result
+        at = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+        fresh = dict(next_attempt_at=None, last_attempt_at=None)
+        self.assertEqual(rate_limit_pause(fresh, 0, at), RATE_LIMIT_FIRST_PAUSE)
+        # A provider's own Retry-After is a floor, not a ceiling; the first pause stays the minimum.
+        self.assertEqual(rate_limit_pause(fresh, 900, at), 900)
+        self.assertEqual(rate_limit_pause(fresh, 10, at), RATE_LIMIT_FIRST_PAUSE)
+        # Consecutive limits double the previous pause up to the cap.
+        previous = dict(last_attempt_at="2026-10-01T11:00:00Z", next_attempt_at="2026-10-01T11:05:00Z")
+        self.assertEqual(rate_limit_pause(previous, 0, at), 2 * RATE_LIMIT_FIRST_PAUSE)
+        previous = dict(last_attempt_at="2026-10-01T11:00:00Z", next_attempt_at="2026-10-01T11:40:00Z")
+        self.assertEqual(rate_limit_pause(previous, 0, at), RATE_LIMIT_MAX_PAUSE)
+        # Through apply_result: a limit records the pause; a success clears it; an ordinary
+        # error clears it too, since the provider answered.
+        provider = dict(id="p", name="P", enabled=True, status="ok", message=None, fetched_at="2026-10-01T11:00:00Z",
+                        last_attempt_at="2026-10-01T11:00:00Z", primary_metric_id="m", secondary_metric_ids=[],
+                        metrics=[dict(id="m", label="M", kind="quota", scope="individual", unit="%", used=1, limit=100,
+                                      remaining=99, resets_at=None, resets_at_estimated=False, period=None, note=None)],
+                        usage_url=None, setup=None)
+        snapshot = dict(schema_version=2, generated_at="2026-10-01T11:00:00Z", providers=[provider])
+        apply_result(snapshot, "p", dict(status="error", message="Rate limited.", last_attempt_at="2026-10-01T12:00:00Z", retry_after=0))
+        self.assertEqual(provider["next_attempt_at"], "2026-10-01T12:05:00Z")
+        self.assertEqual(provider["metrics"][0]["used"], 1)  # retained
+        self.assertTrue(is_pausing(provider, at))
+        self.assertFalse(is_pausing(provider, datetime(2026, 10, 1, 12, 6, tzinfo=timezone.utc)))
+        apply_result(snapshot, "p", dict(status="error", message="Rate limited.", last_attempt_at="2026-10-01T12:05:00Z", retry_after=0))
+        self.assertEqual(provider["next_attempt_at"], "2026-10-01T12:15:00Z")
+        apply_result(snapshot, "p", dict(status="error", message="Unreachable.", last_attempt_at="2026-10-01T12:16:00Z"))
+        self.assertIsNone(provider["next_attempt_at"])
+        apply_result(snapshot, "p", dict(status="error", message="Rate limited.", last_attempt_at="2026-10-01T12:17:00Z", retry_after=0))
+        self.assertEqual(provider["next_attempt_at"], "2026-10-01T12:22:00Z")
+        from bars_collector.model import validate_snapshot
+        validate_snapshot(snapshot)
+        apply_result(snapshot, "p", dict(status="ok", message=None, fetched_at="2026-10-01T12:30:00Z",
+                                         last_attempt_at="2026-10-01T12:30:00Z", primary_metric_id="m",
+                                         secondary_metric_ids=[], metrics=provider["metrics"]))
+        self.assertIsNone(provider["next_attempt_at"])
 
     def test_backoff_waits_double_with_jitter_and_stop_before_the_deadline(self):
         from bars_collector.runner import retry_delays

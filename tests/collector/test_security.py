@@ -106,6 +106,26 @@ class LocalServerTests(unittest.TestCase):
         self.assertTrue(access.secure_destination("https://api.example.com/usage"))
         self.assertEqual(self.server.landings, [])
 
+    def test_retry_after_header_is_read_in_both_forms(self):
+        from email.message import Message
+        from email.utils import format_datetime
+        from datetime import datetime, timedelta, timezone
+        from bars_plugin.access import retry_after_seconds
+        def headers(value):
+            m = Message()
+            if value is not None:
+                m["Retry-After"] = value
+            return m
+        self.assertEqual(retry_after_seconds(headers(None)), 0)
+        self.assertEqual(retry_after_seconds(headers("")), 0)
+        self.assertEqual(retry_after_seconds(headers("0")), 0)
+        self.assertEqual(retry_after_seconds(headers("120")), 120)
+        self.assertEqual(retry_after_seconds(headers("-5")), 0)
+        self.assertEqual(retry_after_seconds(headers("soon")), 0)
+        future = retry_after_seconds(headers(format_datetime(datetime.now(timezone.utc) + timedelta(seconds=300), usegmt=True)))
+        self.assertTrue(290 <= future <= 300, future)
+        self.assertEqual(retry_after_seconds(headers("Thu, 01 Jan 2015 00:00:00 GMT")), 0)
+
     def test_oversized_response_is_rejected(self):
         with self.assertRaises(CollectionError) as raised:
             access.http_json(self.url("/large"), {})

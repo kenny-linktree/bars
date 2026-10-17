@@ -193,7 +193,19 @@ enum UsagePresentation {
         if let fetched = provider.fetchedAt,
            abs(attempted.timeIntervalSince(fetched)) <= sharedFetchTolerance { return nil }
         let clock = clockText(attempted, now: now, seconds: false, locale: locale, timeZone: timeZone)
+        if let pause = pauseText(for: provider, now: now, locale: locale, timeZone: timeZone) {
+            return "Last attempt \(clock) hit the provider's rate limit · \(pause)"
+        }
         return "Last attempt \(clock) did not succeed"
+    }
+
+    /// `retries 6:15 PM` while the provider's scheduled attempts are paused after a rate limit.
+    /// The row shows this in place of the failure badge: the data is retained and the pause
+    /// is the plan, not a fault. Nil once the pause has ended or when there is none.
+    static func pauseText(for provider: ProviderSnapshot, now: Date, locale: Locale = .current,
+                          timeZone: TimeZone = .current) -> String? {
+        guard provider.isPausing(at: now), let until = provider.nextAttemptAt else { return nil }
+        return "retries \(clockText(until, now: now, seconds: false, locale: locale, timeZone: timeZone))"
     }
 
     // MARK: - Resets

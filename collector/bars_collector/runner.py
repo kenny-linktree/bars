@@ -7,6 +7,7 @@ prints, exits early or reports nonsense therefore costs its own provider one att
 and nothing else.
 """
 
+from datetime import datetime, timedelta, timezone
 import json
 import multiprocessing
 from multiprocessing.connection import wait
@@ -19,7 +20,8 @@ import time
 from bars_plugin.access import child_environment
 from bars_plugin.values import MAX_TEXT
 
-from .model import MAX_SNAPSHOT_BYTES, CollectionError, apply_enabled, encoded_size, now, reconcile, validate_result
+from .model import (MAX_SNAPSHOT_BYTES, CollectionError, apply_enabled, encoded_size, is_pausing, now, parse_instant,
+                    rate_limit_pause, reconcile, validate_result)
 from .storage import load_snapshot, write_snapshot, writer_lock
 
 # A valid result is a few kilobytes; anything near this is a plugin fault.
@@ -101,7 +103,10 @@ def attempt(collector):
     try:
         return {"status": "ok", "message": None, **collector()}
     except CollectionError as error:
-        return {"status": error.status, "message": safe_message(error)}
+        value = {"status": error.status, "message": safe_message(error)}
+        if error.retry_after is not None:
+            value["retry_after"] = error.retry_after
+        return value
     except BaseException:
         # Raw exception strings may include tokens, endpoints, IDs or response data.
         return {"status": "error", "message": FAILURE_MESSAGE}
@@ -120,16 +125,21 @@ def retry_delays(deadline, first=RETRY_FIRST_DELAY, jitter=random.random, clock=
         delay *= 2
 
 
+def retryable(value):
+    """Transient failures retry; a rate limit does not, since asking again is what it forbids."""
+    return value["status"] in RETRYABLE and "retry_after" not in value
+
+
 def collect_with_retries(collector, deadline, delays=None):
     """Call the plugin until it succeeds or reports a non-transient status, backing off
     exponentially between transient failures, until the monotonic `deadline`. The caller's
     process deadline still bounds a single slow attempt."""
     value = attempt(collector)
-    if value["status"] not in RETRYABLE:
+    if not retryable(value):
         return value
     for _ in (retry_delays(deadline) if delays is None else delays):
         value = attempt(collector)
-        if value["status"] not in RETRYABLE:
+        if not retryable(value):
             break
     return value
 
@@ -252,6 +262,7 @@ def apply_result(snapshot, pid, value):
     retained = dict(previous)
     if value["status"] == "ok":
         previous.update(value)
+        previous["next_attempt_at"] = None
         # Every reader refuses a snapshot over the size bound, so a result that would push
         # the whole file past it is refused instead, keeping the file readable.
         if encoded_size(snapshot) > MAX_SNAPSHOT_BYTES:
@@ -261,6 +272,13 @@ def apply_result(snapshot, pid, value):
     if value["status"] != "ok":
         # A failed attempt cannot replace the last successful period or timestamp.
         previous.update({k: value[k] for k in ("status", "message", "last_attempt_at")})
+        if "retry_after" in value:
+            # A rate limit pauses this provider's scheduled attempts; see rate_limit_pause.
+            attempted = parse_instant(value["last_attempt_at"])
+            pause = rate_limit_pause(retained, value["retry_after"], attempted)
+            previous["next_attempt_at"] = (attempted + timedelta(seconds=pause)).isoformat(timespec="seconds").replace("+00:00", "Z")
+        else:
+            previous["next_attempt_at"] = None
         # Nor may its message be the bytes that push the file past the bound.
         if encoded_size(snapshot) > MAX_SNAPSHOT_BYTES:
             previous.clear()
@@ -272,12 +290,13 @@ def unloadable_result(plugin):
     return dict(status="error", message=plugin.error, last_attempt_at=now())
 
 
-def run(output, selected, timeout=DEFAULT_TIMEOUT, results=None, disabled=(), plugins=()):
+def run(output, selected, timeout=DEFAULT_TIMEOUT, results=None, disabled=(), plugins=(), respect_pauses=False):
     """Collect `selected` providers from `plugins`, skipping any in `disabled`.
 
     Every run rebuilds the provider list from the discovered plugins and records each
     provider's enabled state. A disabled provider's worker never starts and its other
-    fields stay exactly as retained. Unknown ids in `selected` are ignored.
+    fields stay exactly as retained. Unknown ids in `selected` are ignored. With
+    `respect_pauses` (scheduled runs), a provider pausing after a rate limit is skipped too.
     """
     disabled = frozenset(disabled)
     by_id = {plugin.id: plugin for plugin in plugins}
@@ -293,6 +312,9 @@ def run(output, selected, timeout=DEFAULT_TIMEOUT, results=None, disabled=(), pl
             # Too many plugins for one file is the one change that cannot be trimmed to fit;
             # the previous readable snapshot stays, and the command reports why.
             write_snapshot(output, snapshot)
+        if respect_pauses:
+            pausing = {p["id"] for p in snapshot["providers"] if is_pausing(p, datetime.now(timezone.utc))}
+            selected = [pid for pid in selected if pid not in pausing]
         if not selected:
             return snapshot
         for pid in [pid for pid in selected if not by_id[pid].loadable]:

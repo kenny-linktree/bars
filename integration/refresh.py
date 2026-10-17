@@ -287,6 +287,10 @@ def collect_and_publish(config: dict, directory: Path, provider: str | None,
             "--plugins", str(config.get("plugins_path") or directory / "plugins")]
     if provider:
         args += ["--provider", provider]
+    # A scheduled run leaves a rate-limited provider alone until its pause ends; a refresh
+    # the person asked for tries anyway.
+    if not explicit:
+        args.append("--respect-pauses")
     # The collector skips disabled workers and records every provider's enabled state.
     for pid in disabled_providers(config, logger):
         args += ["--disable", pid]

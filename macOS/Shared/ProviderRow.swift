@@ -196,6 +196,9 @@ struct ProviderRow: View {
                 : Text(UsagePresentation.age(since: fetchedAt, now: now))
             if status == .ok {
                 age
+            } else if let pause = UsagePresentation.pauseText(for: provider, now: now) {
+                // A rate-limit pause is the plan, not a fault: say when, with the data's age.
+                Text("\(Image(systemName: "hourglass")) Rate limited · \(pause) · \(age)")
             } else {
                 Text("\(Image(systemName: status.symbolName)) \(status.label) · \(age)")
             }
