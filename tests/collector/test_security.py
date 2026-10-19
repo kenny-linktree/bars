@@ -106,25 +106,35 @@ class LocalServerTests(unittest.TestCase):
         self.assertTrue(access.secure_destination("https://api.example.com/usage"))
         self.assertEqual(self.server.landings, [])
 
-    def test_retry_after_header_is_read_in_both_forms(self):
+    def test_rate_limit_headers_are_read_in_every_standard_form(self):
         from email.message import Message
         from email.utils import format_datetime
         from datetime import datetime, timedelta, timezone
-        from bars_plugin.access import retry_after_seconds
-        def headers(value):
+        from bars_plugin import rate_limit_pause_seconds
+        now = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+        def headers(**values):
             m = Message()
-            if value is not None:
-                m["Retry-After"] = value
+            for key, value in values.items():
+                m[key.replace("_", "-")] = value
             return m
-        self.assertEqual(retry_after_seconds(headers(None)), 0)
-        self.assertEqual(retry_after_seconds(headers("")), 0)
-        self.assertEqual(retry_after_seconds(headers("0")), 0)
-        self.assertEqual(retry_after_seconds(headers("120")), 120)
-        self.assertEqual(retry_after_seconds(headers("-5")), 0)
-        self.assertEqual(retry_after_seconds(headers("soon")), 0)
-        future = retry_after_seconds(headers(format_datetime(datetime.now(timezone.utc) + timedelta(seconds=300), usegmt=True)))
-        self.assertTrue(290 <= future <= 300, future)
-        self.assertEqual(retry_after_seconds(headers("Thu, 01 Jan 2015 00:00:00 GMT")), 0)
+        self.assertEqual(rate_limit_pause_seconds(headers(), now), 0)
+        self.assertEqual(rate_limit_pause_seconds(None, now), 0)
+        # RFC 9110 Retry-After: delay-seconds, HTTP-date, and the unusable forms.
+        self.assertEqual(rate_limit_pause_seconds(headers(Retry_After="120"), now), 120)
+        self.assertEqual(rate_limit_pause_seconds(headers(Retry_After="0"), now), 0)
+        self.assertEqual(rate_limit_pause_seconds(headers(Retry_After=format_datetime(now + timedelta(seconds=300), usegmt=True)), now), 300)
+        self.assertEqual(rate_limit_pause_seconds(headers(Retry_After="Thu, 01 Jan 2015 00:00:00 GMT"), now), 0)
+        self.assertEqual(rate_limit_pause_seconds(headers(Retry_After="-5"), now), 0)
+        # IETF draft: structured RateLimit field or RateLimit-Reset in seconds.
+        self.assertEqual(rate_limit_pause_seconds(headers(RateLimit="limit=100, remaining=0; reset=45"), now), 45)
+        self.assertEqual(rate_limit_pause_seconds(headers(RateLimit_Reset="90"), now), 90)
+        # X- variants: delta-seconds or a Unix timestamp.
+        self.assertEqual(rate_limit_pause_seconds(headers(X_RateLimit_Reset="30"), now), 30)
+        self.assertEqual(rate_limit_pause_seconds(headers(X_RateLimit_Reset=str(int(now.timestamp()) + 600)), now), 600)
+        self.assertEqual(rate_limit_pause_seconds(headers(X_Rate_Limit_Reset=str(int(now.timestamp()) - 600)), now), 0)
+        # Retry-After wins when several are present; an unusable Retry-After falls through.
+        self.assertEqual(rate_limit_pause_seconds(headers(Retry_After="10", X_RateLimit_Reset="500"), now), 10)
+        self.assertEqual(rate_limit_pause_seconds(headers(Retry_After="soon", X_RateLimit_Reset="500"), now), 500)
 
     def test_oversized_response_is_rejected(self):
         with self.assertRaises(CollectionError) as raised:
@@ -181,12 +191,19 @@ class EndpointTests(unittest.TestCase):
         self.addCleanup(env.stop)
         self.requests = []
 
-    def fake_opener(self, body):
+    def fake_opener(self, body, status=200, headers=None):
         recorder = self.requests
+        import email.message
+        import urllib.error
 
         class Opener:
             def open(self, request, timeout):
                 recorder.append((request, timeout))
+                if status != 200:
+                    message = email.message.Message()
+                    for key, value in (headers or {}).items():
+                        message[key] = value
+                    raise urllib.error.HTTPError(request.full_url, status, "synthetic", message, io.BytesIO(b""))
                 return io.BytesIO(json.dumps(body).encode())
         return Opener()
 
@@ -198,12 +215,12 @@ class EndpointTests(unittest.TestCase):
         paths = (self.home / ".codex/auth.json", self.home / ".local/share/devin/credentials.toml")
         return {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
 
-    def collect(self, pid, body):
+    def collect(self, pid, body, status=200, headers=None):
         self.requests.clear()
         logins = self.login_files()
         with patch.object(plugin("claude"), "keychain", side_effect=self.keychain), \
                 patch.object(plugin("cursor"), "keychain", side_effect=self.keychain), \
-                patch.object(access, "opener", return_value=self.fake_opener(body)):
+                patch.object(access, "opener", return_value=self.fake_opener(body, status, headers)):
             result = plugin(pid).collect()
         self.assertEqual(self.login_files(), logins, "login files are read, never written")
         # Devin asks two fixed endpoints (shared balance and quotas, then this person's draw).
@@ -213,6 +230,22 @@ class EndpointTests(unittest.TestCase):
         for secret in SECRETS:
             self.assertNotIn(secret, json.dumps(result))
         return self.requests[0][0]
+
+    def test_429_and_503_with_retry_after_carry_the_pause_for_every_standard_plugin(self):
+        # One request path serves all standard plugins, so the rate-limit handling is shared.
+        from bars_plugin.values import CollectionError
+        for pid in ("claude", "codex", "cursor", "devin"):
+            for code, header, expected in ((429, {"Retry-After": "90"}, 90), (429, {}, 0),
+                                           (503, {"Retry-After": "120"}, 120)):
+                with self.subTest(pid=pid, code=code, header=header):
+                    with self.assertRaises(CollectionError) as caught:
+                        self.collect(pid, None, status=code, headers=header)
+                    self.assertEqual(caught.exception.status, "error")
+                    self.assertEqual(caught.exception.retry_after, expected)
+            # A 503 without Retry-After stays an ordinary transient error (retried in-run).
+            with self.assertRaises(CollectionError) as caught:
+                self.collect(pid, None, status=503, headers={})
+            self.assertIsNone(caught.exception.retry_after)
 
     def assert_only_own_secrets(self, request, own):
         headers = request.header_items()

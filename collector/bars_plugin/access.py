@@ -217,25 +217,63 @@ def secure_destination(url):
     return parts.scheme == "http" and parts.hostname == "127.0.0.1"
 
 
-def retry_after_seconds(headers):
-    """The pause a `Retry-After` header asks for, in whole seconds; 0 when absent or unusable.
+def _header(headers, name):
+    value = headers.get(name) if headers is not None else None
+    return value.strip() if isinstance(value, str) else ""
 
-    Accepts the delay-seconds and HTTP-date forms. A date in the past, a negative number
-    or anything else is 0, which the collector treats as "rate limited, pick the pause".
-    """
-    value = (headers.get("Retry-After") if headers is not None else None) or ""
-    value = value.strip()
-    if not value:
-        return 0
+
+def _delay_or_date(value, now):
+    """Seconds from `now` for a delay-seconds or HTTP-date value (Retry-After grammar), else None."""
     if value.isdigit():
         return int(value)
     try:
         when = email.utils.parsedate_to_datetime(value)
     except (TypeError, ValueError, IndexError):
-        return 0
+        return None
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
-    return max(0, int((when - datetime.now(timezone.utc)).total_seconds()))
+    return max(0, int((when - now).total_seconds()))
+
+
+def _reset_seconds(value, now):
+    """Seconds until a reset given as delta-seconds or as a Unix timestamp (both are in use)."""
+    if not value.isdigit():
+        return None
+    seconds = int(value)
+    # Anything that looks like an epoch (after 2001) is a point in time, not a delta.
+    return max(0, seconds - int(now.timestamp())) if seconds > 10 ** 9 else seconds
+
+
+def rate_limit_pause_seconds(headers, now=None):
+    """The pause a rate-limiting response asks for, in whole seconds; 0 when it gives none.
+
+    Every standard plugin gets this through `http_json`, which calls it for HTTP 429 and
+    for HTTP 503 with `Retry-After`; a plugin using another transport can call it with the
+    response headers. Headers are read in this order and the first usable value wins:
+
+    1. `Retry-After` (RFC 9110): delay-seconds or an HTTP-date.
+    2. `RateLimit` / `RateLimit-Reset` (IETF ratelimit headers draft): `reset` in seconds.
+    3. `X-RateLimit-Reset` or `X-Rate-Limit-Reset`: delta-seconds or a Unix timestamp.
+
+    A value in the past, negative or malformed counts as none. 0 tells the collector "rate
+    limited, choose the pause", which it does with its own escalating defaults.
+    """
+    now = now or datetime.now(timezone.utc)
+    value = _header(headers, "Retry-After")
+    if value:
+        seconds = _delay_or_date(value, now)
+        if seconds is not None:
+            return seconds
+    structured = _header(headers, "RateLimit")
+    for part in structured.split(";") if structured else ():
+        key, _, number = part.strip().partition("=")
+        if key.strip().lower() == "reset" and number.strip().isdigit():
+            return int(number.strip())
+    for name in ("RateLimit-Reset", "X-RateLimit-Reset", "X-Rate-Limit-Reset"):
+        seconds = _reset_seconds(_header(headers, name), now)
+        if seconds is not None:
+            return seconds
+    return 0
 
 
 def http_json(url, headers, timeout=12):
@@ -266,7 +304,11 @@ def http_json(url, headers, timeout=12):
             raise CollectionError("Login required. Open the provider CLI to refresh its login.", "login_required") from None
         if code == 429:
             raise CollectionError("Provider rate limit reached. Collection will retry later.",
-                                  retry_after=retry_after_seconds(error.headers)) from None
+                                  retry_after=rate_limit_pause_seconds(error.headers)) from None
+        if code == 503 and _header(error.headers, "Retry-After"):
+            # An outage with a stated pause is honored like a rate limit: no retry storm.
+            raise CollectionError("Provider is temporarily unavailable. Collection will retry later.",
+                                  retry_after=rate_limit_pause_seconds(error.headers)) from None
         if 300 <= code < 400:
             raise CollectionError("Provider redirected the request; Bars refused to follow it (HTTP %d)." % code) from None
         raise CollectionError("Provider request failed (HTTP %d)." % code) from None
