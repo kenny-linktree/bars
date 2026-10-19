@@ -307,6 +307,11 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(provider["next_attempt_at"], "2026-10-01T12:22:00Z")
         from bars_collector.model import validate_snapshot
         validate_snapshot(snapshot)
+        # A success with a pause still recorded is a contradiction the validator refuses.
+        provider["status"] = "ok"
+        with self.assertRaises(ValueError):
+            validate_snapshot(snapshot)
+        provider["status"] = "error"
         apply_result(snapshot, "p", dict(status="ok", message=None, fetched_at="2026-10-01T12:30:00Z",
                                          last_attempt_at="2026-10-01T12:30:00Z", primary_metric_id="m",
                                          secondary_metric_ids=[], metrics=provider["metrics"]))

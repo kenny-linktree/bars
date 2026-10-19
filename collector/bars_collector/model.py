@@ -162,7 +162,7 @@ def validate_provider(p):
     if not isinstance(secondary, list) or len(set(secondary)) != len(secondary) \
             or not all(mid in ids and mid != p["primary_metric_id"] for mid in secondary):
         raise ValueError("Invalid secondary metrics.")
-    if p["status"] == "ok" and (not p["metrics"] or p["fetched_at"] is None):
+    if p["status"] == "ok" and (not p["metrics"] or p["fetched_at"] is None or p.get("next_attempt_at") is not None):
         raise ValueError("Invalid successful provider.")
     return p
 

@@ -205,7 +205,13 @@ enum UsagePresentation {
     static func pauseText(for provider: ProviderSnapshot, now: Date, locale: Locale = .current,
                           timeZone: TimeZone = .current) -> String? {
         guard provider.isPausing(at: now), let until = provider.nextAttemptAt else { return nil }
-        return "retries \(clockText(until, now: now, seconds: false, locale: locale, timeZone: timeZone))"
+        var text = "retries \(clockText(until, now: now, seconds: false, locale: locale, timeZone: timeZone))"
+        // Across a daylight-saving change the clock time alone would look overdue; name the zone.
+        if timeZone.secondsFromGMT(for: until) != timeZone.secondsFromGMT(for: now),
+           let zone = timeZone.abbreviation(for: until) {
+            text += " \(zone)"
+        }
+        return text
     }
 
     // MARK: - Resets

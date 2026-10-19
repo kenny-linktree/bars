@@ -189,16 +189,18 @@ struct ProviderRow: View {
     /// Status symbol and label when the latest attempt failed, then the data age.
     @ViewBuilder private var deviation: some View {
         let status = provider.status
-        if let fetchedAt = provider.fetchedAt {
-            let age = compact
+        let age: Text? = provider.fetchedAt.map { fetchedAt in
+            compact
                 // WidgetKit can delay timeline reloads. Relative text keeps aging itself.
                 ? Text("\(Text(fetchedAt, style: .relative)) ago")
                 : Text(UsagePresentation.age(since: fetchedAt, now: now))
+        }
+        if status != .ok, let pause = UsagePresentation.pauseText(for: provider, now: now) {
+            // A rate-limit pause is the plan, not a fault: say when, and the data's age if any.
+            Text("\(Image(systemName: "hourglass")) Rate limited · \(pause)\(age.map { Text(" · \($0)") } ?? Text(""))")
+        } else if let age {
             if status == .ok {
                 age
-            } else if let pause = UsagePresentation.pauseText(for: provider, now: now) {
-                // A rate-limit pause is the plan, not a fault: say when, with the data's age.
-                Text("\(Image(systemName: "hourglass")) Rate limited · \(pause) · \(age)")
             } else {
                 Text("\(Image(systemName: status.symbolName)) \(status.label) · \(age)")
             }

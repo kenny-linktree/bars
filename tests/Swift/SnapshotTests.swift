@@ -1102,6 +1102,22 @@ final class SnapshotTests: XCTestCase {
         XCTAssertEqual(UsagePresentation.failedAttemptNote(for: provider, now: during, locale: locale, timeZone: zone)?
                            .replacingOccurrences(of: "\u{202f}", with: " "),
                        "Last attempt 12:05 PM hit the provider's rate limit · retries 12:10 PM")
+        // Across the autumn change the retry names its zone, since the clock time repeats.
+        let losAngeles = TimeZone(identifier: "America/Los_Angeles")!
+        var autumn = provider
+        autumn.nextAttemptAt = SnapshotDate.parse("2026-11-01T09:08:00Z")  // 1:08 AM PST
+        let beforeChange = SnapshotDate.parse("2026-11-01T08:58:00Z")!      // 1:58 AM PDT
+        XCTAssertEqual(UsagePresentation.pauseText(for: autumn, now: beforeChange, locale: locale, timeZone: losAngeles)?
+                           .replacingOccurrences(of: "\u{202f}", with: " "), "retries 1:08 AM PST")
+        // A success and a pause contradict each other; the publisher refuses the pair.
+        let contradictory = """
+        {"schema_version": 2, "generated_at": "2026-10-01T12:05:00Z", "providers": [
+         {"id": "p", "name": "P", "status": "ok", "message": null, "fetched_at": "2026-10-01T12:05:00Z",
+          "last_attempt_at": "2026-10-01T12:05:00Z", "next_attempt_at": "2026-10-01T12:10:00Z", "primary_metric_id": "m",
+          "metrics": [{"id": "m", "label": "M", "kind": "quota", "scope": "individual", "unit": "%", "used": 1, "limit": 100,
+                       "remaining": 99, "resets_at": null}]}]}
+        """
+        XCTAssertThrowsError(try UsageSnapshot.decode(Data(contradictory.utf8)))
         // Older snapshots without the field decode with no pause.
         var plain = provider
         plain.nextAttemptAt = nil

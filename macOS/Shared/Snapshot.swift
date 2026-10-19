@@ -346,6 +346,8 @@ struct UsageSnapshot: Codable, Equatable {
                 throw SnapshotError.invalidMetrics
             }
             if !provider.metrics.isEmpty && provider.fetchedAt == nil { throw SnapshotError.invalidMetrics }
+            // A success ends any rate-limit pause; the two together would contradict each other.
+            if provider.status == .ok && provider.nextAttemptAt != nil { throw SnapshotError.invalidProviders }
             for metric in provider.metrics {
                 guard Self.isMetricID(metric.id), Self.isDisplayText(metric.label), Self.isDisplayText(metric.unit),
                       metric.note.map({ Self.isDisplayText($0) }) ?? true else {
