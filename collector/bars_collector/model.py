@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 import re
 
-from bars_plugin.values import (KINDS, MAX_TEXT, METRIC_ID, PERIODS, SCOPES, STATUSES, CollectionError, now,
+from bars_plugin.values import (KINDS, MAX_RETRY_AFTER, MAX_TEXT, METRIC_ID, PERIODS, SCOPES, STATUSES, CollectionError, now,
                                 number, timestamp)
 
 from .plugins import PLUGIN_ID, SETUP_FIELDS
@@ -20,7 +20,6 @@ RESULT_FIELDS = ("primary_metric_id", "secondary_metric_ids", "metrics")
 # provider's own Retry-After. An explicit refresh ignores the pause.
 RATE_LIMIT_FIRST_PAUSE = 5 * 60
 RATE_LIMIT_MAX_PAUSE = 60 * 60
-MAX_RETRY_AFTER = 24 * 3600
 # Keeps any one plugin from growing the snapshot past the readers' 1 MiB bound.
 MAX_METRICS = 32
 # The readers and the collector both refuse a snapshot larger than this once written, so

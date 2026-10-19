@@ -338,6 +338,16 @@ pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps({'s
         self.assertEqual((self.directory / "snapshot.json").read_text(), old)
         self.assertFalse((self.directory / "published.jsonl").exists())
 
+    def test_size_bound_exit_status_matches_the_collector(self):
+        # refresh.py runs the collector as a subprocess, so it keeps its own copy of the status.
+        import importlib
+        sys.path.insert(0, str(ROOT / "collector"))
+        try:
+            collector_main = importlib.import_module("bars_collector.__main__")
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(refresh.SNAPSHOT_TOO_LARGE_STATUS, collector_main.SNAPSHOT_TOO_LARGE_STATUS)
+
     def test_snapshot_size_exit_status_is_explained_in_the_log(self):
         # The collector's stderr is never forwarded; a dedicated status carries the one
         # condition a person has to act on (too many plugins for one snapshot file).

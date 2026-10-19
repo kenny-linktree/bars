@@ -17,7 +17,7 @@ Screenshots use synthetic data.
 - **Your provider's allowances.** Claude and Codex support reported monthly budgets, credits and personal subscription quotas. Cursor keeps individual and team amounts separate. Devin leads with its weekly quota and shows your own draw on the shared on-demand credits against what remains in the pool. Support is best effort; not every subscription tier has been verified.
 - **Details when you need them.** Click a provider in the widget or dropdown for its allowances, reset times and a manual refresh. Failed refreshes keep the last successful values and show their age.
 
-Bars collects in the background about every minute, even when the menu bar app is closed, retrying a provider that fails briefly within that minute. The dropdown always shows the latest collection. The desktop widget is asked to redraw when values change, at most every five minutes, and WidgetKit controls when it actually redraws, so it can lag behind the dropdown.
+Bars collects in the background about every minute, even when the menu bar app is closed, retrying a provider that fails briefly within that minute. A provider that says it was asked too often is left alone for a few minutes (longer if it keeps saying so) and the row says when the next attempt is; Refresh now asks anyway. The dropdown always shows the latest collection. The desktop widget is asked to redraw when values change, at most every five minutes, and WidgetKit controls when it actually redraws, so it can lag behind the dropdown.
 
 ## Install
 

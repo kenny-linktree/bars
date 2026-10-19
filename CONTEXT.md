@@ -57,6 +57,13 @@ A reset instant a provider plugin derives from documented behavior, such as the 
 The comparison of an allowance's used share with the share of its period that had elapsed at the last successful fetch. Ahead of pace means the remaining amount would run out before the reset at that rate.
 _Avoid_: Burn rate, velocity
 
+**Rate limit**:
+A provider's answer that it was asked too often (HTTP 429, or 503 with a stated pause). Unlike a transient failure it is not retried within the run; the provider's own figure, read from the standard headers, sets the floor of the pause.
+
+**Pause**:
+The interval after a rate limit during which scheduled collection leaves that provider alone, recorded as `next_attempt_at`: at least the provider's figure, otherwise five minutes, doubling with consecutive limits to an hour. Refresh now ignores it; a success or any other kind of failure ends it. The row shows `Rate limited · retries <time>` while it lasts.
+_Avoid_: Cooldown, backoff (that is the in-run retry wait)
+
 **Pace marker**:
 The tick on a provider bar at the elapsed share of the period. Fill beyond the marker means usage is ahead of pace.
 

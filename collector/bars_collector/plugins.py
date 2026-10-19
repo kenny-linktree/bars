@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import sys
 
-from bars_plugin.values import CollectionError
+from bars_plugin.values import MAX_TEXT, CollectionError
 
 MANIFEST_VERSION = 1
 MANIFEST_NAME = "plugin.json"
@@ -20,7 +20,6 @@ MODULE_NAME = "plugin.py"
 MAX_MANIFEST_BYTES = 65536
 PLUGIN_ID = re.compile(r"[a-z][a-z0-9_]{0,31}")
 MAX_NAME = 32
-MAX_TEXT = 200
 SETUP_FIELDS = ("install_title", "install_url", "login_command", "login_step", "sign_in_again", "credential_note")
 URL_FIELDS = {"install_url"}
 
