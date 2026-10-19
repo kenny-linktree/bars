@@ -1105,6 +1105,7 @@ final class SnapshotTests: XCTestCase {
         // Across the autumn change the retry names its zone, since the clock time repeats.
         let losAngeles = TimeZone(identifier: "America/Los_Angeles")!
         var autumn = provider
+        autumn.lastAttemptAt = SnapshotDate.parse("2026-11-01T08:58:00Z")
         autumn.nextAttemptAt = SnapshotDate.parse("2026-11-01T09:08:00Z")  // 1:08 AM PST
         let beforeChange = SnapshotDate.parse("2026-11-01T08:58:00Z")!      // 1:58 AM PDT
         XCTAssertEqual(UsagePresentation.pauseText(for: autumn, now: beforeChange, locale: locale, timeZone: losAngeles)?

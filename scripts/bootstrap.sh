@@ -155,7 +155,9 @@ fetch_source() {
   if [ -d "$SRC/.git" ] && [ ! -L "$SRC" ] && [ ! -L "$SRC/.git" ]; then
     say "Updating the Bars source in $SRC ($REF)..."
     src_git remote set-url origin "$REPO_URL"
-    src_git fetch --quiet --prune --tags origin
+    # Prune tags too: a tag left by a previously configured repository must not stand in for
+    # one the selected repository does not have.
+    src_git fetch --quiet --prune --prune-tags --tags origin
     # BARS_REF may name a branch or a tag (the documented downgrade uses the v1 tag).
     if src_git rev-parse --quiet --verify "refs/remotes/origin/$REF^{commit}" >/dev/null; then
       src_git checkout --quiet --force -B "$REF" "origin/$REF"

@@ -299,6 +299,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(provider["metrics"][0]["used"], 1)  # retained
         self.assertTrue(is_pausing(provider, at))
         self.assertFalse(is_pausing(provider, datetime(2026, 10, 1, 12, 6, tzinfo=timezone.utc)))
+        # A pause the collector could not have written (edited cache, clock set back) does not
+        # count: more than a day ahead, before its own attempt, or with no attempt at all.
+        parked = dict(provider, next_attempt_at="9999-12-31T23:59:59Z")
+        self.assertFalse(is_pausing(parked, at))
+        self.assertFalse(is_pausing(dict(provider, next_attempt_at="2026-10-01T12:05:00Z", last_attempt_at="2026-10-01T12:30:00Z"), at))
+        self.assertFalse(is_pausing(dict(provider, last_attempt_at=None), at))
+        self.assertTrue(is_pausing(dict(provider, next_attempt_at="2026-10-01T12:05:00.1Z"), at))  # fraction tolerated
         apply_result(snapshot, "p", dict(status="error", message="Rate limited.", last_attempt_at="2026-10-01T12:05:00Z", retry_after=0))
         self.assertEqual(provider["next_attempt_at"], "2026-10-01T12:15:00Z")
         apply_result(snapshot, "p", dict(status="error", message="Unreachable.", last_attempt_at="2026-10-01T12:16:00Z"))

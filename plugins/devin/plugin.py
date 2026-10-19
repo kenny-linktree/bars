@@ -97,11 +97,12 @@ def collect():
     headers = {"Authorization": "Bearer " + key, "x-cog-org-id": organization}
     quota = http_json(QUOTA_URL % organization, headers)
     # The personal figure is secondary: a transient failure there must not cost the balance
-    # and quotas their refresh. A rejected login is reported, since both calls share it.
+    # and quotas their refresh. A rejected login is reported, since both calls share it, and
+    # so is a rate limit, so the collector pauses instead of asking again next minute.
     try:
         my_usage = http_json(MY_USAGE_URL % organization, headers)
     except CollectionError as error:
-        if error.status != "error":
+        if error.status != "error" or error.retry_after is not None:
             raise
         my_usage = None
     return parse(quota, my_usage)

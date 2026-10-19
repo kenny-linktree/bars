@@ -217,31 +217,66 @@ def secure_destination(url):
     return parts.scheme == "http" and parts.hostname == "127.0.0.1"
 
 
+_ASCII_SECONDS = re.compile(r"[0-9]{1,10}")
+
+
 def _header(headers, name):
-    value = headers.get(name) if headers is not None else None
-    return value.strip() if isinstance(value, str) else ""
+    try:
+        values = headers.get_all(name) if headers is not None and hasattr(headers, "get_all") else None
+        if values is None and headers is not None:
+            value = headers.get(name)
+            values = [value] if value is not None else []
+    except Exception:
+        return ""
+    # A repeated field is one list; the first usable value wins in every grammar below.
+    return ", ".join(v.strip() for v in values if isinstance(v, str) and v.strip())[:1024]
+
+
+def _seconds(value):
+    """A bounded ASCII decimal as an int, else None. `str.isdigit()` is not enough: it accepts
+    other scripts' digits that `int()` rejects, and an unbounded string could be enormous."""
+    return int(value) if _ASCII_SECONDS.fullmatch(value) else None
 
 
 def _delay_or_date(value, now):
     """Seconds from `now` for a delay-seconds or HTTP-date value (Retry-After grammar), else None."""
-    if value.isdigit():
-        return int(value)
+    seconds = _seconds(value)
+    if seconds is not None:
+        return seconds
     try:
         when = email.utils.parsedate_to_datetime(value)
-    except (TypeError, ValueError, IndexError):
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if when is None:
         return None
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
-    return max(0, int((when - now).total_seconds()))
+    try:
+        return max(0, int((when - now).total_seconds()))
+    except (OverflowError, ValueError):
+        return None
 
 
 def _reset_seconds(value, now):
     """Seconds until a reset given as delta-seconds or as a Unix timestamp (both are in use)."""
-    if not value.isdigit():
+    seconds = _seconds(value)
+    if seconds is None:
         return None
-    seconds = int(value)
     # Anything that looks like an epoch (after 2001) is a point in time, not a delta.
     return max(0, seconds - int(now.timestamp())) if seconds > 10 ** 9 else seconds
+
+
+def _structured_reset(field):
+    """`t` (the IETF ratelimit-headers draft: `"policy";r=0;t=900`) or the earlier `reset=` key,
+    from the first list item that carries one. Quotes, spaces and other parameters are ignored."""
+    for item in field.split(","):
+        for part in item.split(";")[1:] if ";" in item else item.split(";"):
+            key, _, number = part.strip().partition("=")
+            if key.strip().strip('"').lower() in ("t", "reset"):
+                seconds = _seconds(number.strip().strip('"'))
+                if seconds is not None:
+                    return seconds
+    return None
 
 
 def rate_limit_pause_seconds(headers, now=None):
@@ -252,27 +287,32 @@ def rate_limit_pause_seconds(headers, now=None):
     response headers. Headers are read in this order and the first usable value wins:
 
     1. `Retry-After` (RFC 9110): delay-seconds or an HTTP-date.
-    2. `RateLimit` / `RateLimit-Reset` (IETF ratelimit headers draft): `reset` in seconds.
+    2. `RateLimit` (IETF ratelimit-headers draft): the `t` parameter of the first policy item,
+       or the earlier drafts' `reset=`; then `RateLimit-Reset` in seconds.
     3. `X-RateLimit-Reset` or `X-Rate-Limit-Reset`: delta-seconds or a Unix timestamp.
 
-    A value in the past, negative or malformed counts as none. 0 tells the collector "rate
-    limited, choose the pause", which it does with its own escalating defaults.
+    A value in the past, negative, non-ASCII, oversized or otherwise malformed counts as
+    none. 0 tells the collector "rate limited, choose the pause", which it does with its own
+    escalating defaults. Never raises.
     """
-    now = now or datetime.now(timezone.utc)
-    value = _header(headers, "Retry-After")
-    if value:
-        seconds = _delay_or_date(value, now)
-        if seconds is not None:
-            return seconds
-    structured = _header(headers, "RateLimit")
-    for part in structured.split(";") if structured else ():
-        key, _, number = part.strip().partition("=")
-        if key.strip().lower() == "reset" and number.strip().isdigit():
-            return int(number.strip())
-    for name in ("RateLimit-Reset", "X-RateLimit-Reset", "X-Rate-Limit-Reset"):
-        seconds = _reset_seconds(_header(headers, name), now)
-        if seconds is not None:
-            return seconds
+    try:
+        now = now or datetime.now(timezone.utc)
+        value = _header(headers, "Retry-After")
+        if value:
+            seconds = _delay_or_date(value, now)
+            if seconds is not None:
+                return seconds
+        structured = _header(headers, "RateLimit")
+        if structured:
+            seconds = _structured_reset(structured)
+            if seconds is not None:
+                return seconds
+        for name in ("RateLimit-Reset", "X-RateLimit-Reset", "X-Rate-Limit-Reset"):
+            seconds = _reset_seconds(_header(headers, name), now)
+            if seconds is not None:
+                return seconds
+    except Exception:
+        pass
     return 0
 
 

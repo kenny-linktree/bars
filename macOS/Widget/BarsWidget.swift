@@ -31,7 +31,7 @@ struct BarsTimelineProvider: TimelineProvider {
                 dates.append(fetched.addingTimeInterval(ProviderSnapshot.staleInterval))
             }
             // A rate-limit pause ends at a known instant; the badge must not outlive it.
-            if let nextAttempt = provider.nextAttemptAt {
+            if provider.isPausing(at: now), let nextAttempt = provider.nextAttemptAt {
                 dates.append(nextAttempt)
             }
             dates.append(contentsOf: provider.metrics.compactMap {

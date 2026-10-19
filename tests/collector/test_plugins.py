@@ -315,7 +315,9 @@ class RunTests(unittest.TestCase):
         retained = dict(target)
         apply_result(snapshot, target["id"], dict(status="error", message="E" * 190, last_attempt_at="2026-10-02T00:00:00Z"))
         self.assertLessEqual(encoded_size(snapshot), MAX_SNAPSHOT_BYTES)
-        self.assertEqual(target, retained)
+        # Everything retained; the attempt's one lasting effect is that no pause is recorded.
+        self.assertEqual({k: v for k, v in target.items() if k != "next_attempt_at"}, retained)
+        self.assertIsNone(target["next_attempt_at"])
 
     def test_a_pausing_provider_is_skipped_by_scheduled_runs_only(self):
         limited = ("from bars_plugin import CollectionError\ndef collect():\n"

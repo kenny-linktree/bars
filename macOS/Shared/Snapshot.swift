@@ -216,8 +216,15 @@ struct ProviderSnapshot: Codable, Identifiable, Equatable {
     var primaryMetric: UsageMetric? { metrics.first { $0.id == primaryMetricId } }
     var secondaryMetrics: [UsageMetric] { secondaryMetricIds.compactMap { id in metrics.first { $0.id == id } } }
     func isStale(at now: Date) -> Bool { Self.isStale(fetchedAt: fetchedAt, at: now) }
-    /// True while scheduled attempts are paused after a rate limit.
-    func isPausing(at now: Date) -> Bool { nextAttemptAt.map { $0 > now } ?? false }
+    /// The longest pause the collector ever records; a longer one in a file is not a pause.
+    static let maximumPause: TimeInterval = 24 * 3600
+    /// True while scheduled attempts are paused after a rate limit, within the collector's bound.
+    func isPausing(at now: Date) -> Bool {
+        guard let until = nextAttemptAt, until > now, until.timeIntervalSince(now) <= Self.maximumPause,
+              let attempted = lastAttemptAt, attempted <= until, until.timeIntervalSince(attempted) <= Self.maximumPause
+        else { return false }
+        return true
+    }
 
     /// Data that never succeeded counts as stale.
     static func isStale(fetchedAt: Date?, at now: Date) -> Bool {

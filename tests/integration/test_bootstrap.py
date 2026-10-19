@@ -145,6 +145,14 @@ class BootstrapTests(unittest.TestCase):
         result = self.run_bootstrap(BARS_REPO_URL=bare.as_uri(), BARS_REF="v9")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("v9 is not a branch or tag", result.stderr.decode())
+        # A tag left by a previously configured repository does not stand in for one the newly
+        # selected repository lacks: the retained clone's tags follow the selected remote.
+        other_bare = Path(self.temporary.name) / "other.git"
+        git("clone", "-q", "--bare", str(bare), str(other_bare), cwd=work)
+        git("tag", "-d", "v1", cwd=other_bare)
+        result = self.run_bootstrap(BARS_REPO_URL=other_bare.as_uri(), BARS_REF="v1")
+        self.assertNotEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn("v1 is not a branch or tag", result.stderr.decode())
 
     @unittest.skipUnless(tools_available(), "Command Line Tools and git are required")
     def test_rerun_fast_forwards_and_discards_local_changes(self):

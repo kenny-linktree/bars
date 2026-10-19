@@ -198,11 +198,16 @@ def validate_result(value):
 
 
 def parse_instant(value):
-    """A canonical snapshot timestamp as an aware datetime, or None."""
+    """A canonical snapshot timestamp as an aware datetime, or None.
+
+    Second precision is enough here, and dropping the fraction keeps Python 3.9's
+    `fromisoformat`, which accepts only three- or six-digit fractions, from refusing a
+    timestamp the validator accepts.
+    """
     if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(re.sub(r"[.,]\d+", "", value).replace("Z", "+00:00"))
     except ValueError:
         return None
 
@@ -223,9 +228,17 @@ def rate_limit_pause(previous, retry_after, at):
 
 
 def is_pausing(provider, at):
-    """True while the provider's scheduled attempts are paused for a rate limit."""
+    """True while the provider's scheduled attempts are paused for a rate limit.
+
+    A pause the collector did not write (an edited or foreign cache, or a clock that was set
+    back) could otherwise park a provider for years: a pause counts only while it ends within
+    `MAX_RETRY_AFTER` of now and began no earlier than its own last attempt.
+    """
     until = parse_instant(provider.get("next_attempt_at"))
-    return until is not None and until > at
+    if until is None or until <= at or (until - at).total_seconds() > MAX_RETRY_AFTER:
+        return False
+    attempted = parse_instant(provider.get("last_attempt_at"))
+    return attempted is not None and attempted <= until and (until - attempted).total_seconds() <= MAX_RETRY_AFTER
 
 
 def validate_snapshot(snapshot):

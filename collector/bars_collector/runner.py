@@ -272,17 +272,21 @@ def apply_result(snapshot, pid, value):
     if value["status"] != "ok":
         # A failed attempt cannot replace the last successful period or timestamp.
         previous.update({k: value[k] for k in ("status", "message", "last_attempt_at")})
+        next_attempt = None
         if "retry_after" in value:
             # A rate limit pauses this provider's scheduled attempts; see rate_limit_pause.
             attempted = parse_instant(value["last_attempt_at"])
             pause = rate_limit_pause(retained, value["retry_after"], attempted)
-            previous["next_attempt_at"] = (attempted + timedelta(seconds=pause)).isoformat(timespec="seconds").replace("+00:00", "Z")
-        else:
-            previous["next_attempt_at"] = None
-        # Nor may its message be the bytes that push the file past the bound.
+            next_attempt = (attempted + timedelta(seconds=pause)).isoformat(timespec="seconds").replace("+00:00", "Z")
+        previous["next_attempt_at"] = next_attempt
+        # Nor may its message be the bytes that push the file past the bound. The pause
+        # outcome still stands: an attempt that answered must not leave a stale pause behind.
         if encoded_size(snapshot) > MAX_SNAPSHOT_BYTES:
             previous.clear()
             previous.update(retained)
+            previous["next_attempt_at"] = next_attempt
+            if encoded_size(snapshot) > MAX_SNAPSHOT_BYTES:
+                previous["next_attempt_at"] = retained.get("next_attempt_at")
     snapshot["generated_at"] = now()
 
 

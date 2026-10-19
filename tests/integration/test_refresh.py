@@ -1086,6 +1086,29 @@ class InstallationTransactionTests(unittest.TestCase):
         self.assertFalse((plugins / "claude").exists())
         self.assertTrue((plugins / "codex").is_symlink())
 
+    def test_rollback_never_writes_through_a_linked_ancestor_directory(self):
+        # plugins/ itself replaced by a link after the files were written makes plugins/claude
+        # look like a real directory while living elsewhere; rollback must see through that.
+        elsewhere = Path(self.temporary.name) / "elsewhere"
+        (elsewhere / "claude").mkdir(parents=True)
+        (elsewhere / "claude/plugin.py").write_text("# sentinel\n")
+
+        def swap_then_fail(destination):
+            if (self.support / "plugins").is_symlink():
+                return  # rollback re-registers the restored app
+            shutil.rmtree(self.support / "plugins")
+            (self.support / "plugins").symlink_to(elsewhere)
+            raise subprocess.CalledProcessError(1, ["lsregister"])
+        with patch.object(installer, "register_app", side_effect=swap_then_fail), \
+                self.assertRaises(subprocess.CalledProcessError):
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        # Non-plugin files rolled back; the link's target untouched by the rollback.
+        self.assert_old_installation()
+        self.assertEqual((elsewhere / "claude/plugin.py").read_text(), "# sentinel\n")
+        self.assertEqual(sorted(p.name for p in elsewhere.iterdir()), ["claude"])
+        self.assertFalse((elsewhere / "claude/plugin.json").exists())
+        self.assertTrue((self.support / "plugins").is_symlink())
+
     def test_writes_refuse_any_destination_directory_that_became_a_link(self):
         # Not only plugin directories: the LaunchAgents directory swapped for a link after
         # the preflight must not redirect the plist write, and rollback must not follow it.

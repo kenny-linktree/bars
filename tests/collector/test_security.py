@@ -132,6 +132,14 @@ class LocalServerTests(unittest.TestCase):
         self.assertEqual(rate_limit_pause_seconds(headers(X_RateLimit_Reset="30"), now), 30)
         self.assertEqual(rate_limit_pause_seconds(headers(X_RateLimit_Reset=str(int(now.timestamp()) + 600)), now), 600)
         self.assertEqual(rate_limit_pause_seconds(headers(X_Rate_Limit_Reset=str(int(now.timestamp()) - 600)), now), 0)
+        # The IETF draft's structured form: a quoted policy item with r= and t= parameters.
+        self.assertEqual(rate_limit_pause_seconds(headers(RateLimit='"default";r=0;t=3600'), now), 3600)
+        self.assertEqual(rate_limit_pause_seconds(headers(RateLimit='"burst";r=2;t=5, "daily";r=0;t=7200'), now), 5)
+        # Malformed values never raise and never restore in-run retries: they read as "no figure".
+        for bad in ("\u00b2", "9" * 5000, "1e3", "٣", "t=", "NaN"):
+            self.assertEqual(rate_limit_pause_seconds(headers(Retry_After=bad), now), 0, bad)
+            self.assertEqual(rate_limit_pause_seconds(headers(RateLimit=bad), now), 0, bad)
+            self.assertEqual(rate_limit_pause_seconds(headers(X_RateLimit_Reset=bad), now), 0, bad)
         # Retry-After wins when several are present; an unusable Retry-After falls through.
         self.assertEqual(rate_limit_pause_seconds(headers(Retry_After="10", X_RateLimit_Reset="500"), now), 10)
         self.assertEqual(rate_limit_pause_seconds(headers(Retry_After="soon", X_RateLimit_Reset="500"), now), 500)
@@ -246,6 +254,30 @@ class EndpointTests(unittest.TestCase):
             with self.assertRaises(CollectionError) as caught:
                 self.collect(pid, None, status=503, headers={})
             self.assertIsNone(caught.exception.retry_after)
+            # A malformed Retry-After on a 429 is still a rate limit, with no figure.
+            with self.assertRaises(CollectionError) as caught:
+                self.collect(pid, None, status=429, headers={"Retry-After": "\u00b2"})
+            self.assertEqual(caught.exception.retry_after, 0)
+
+    def test_devin_surfaces_a_rate_limit_on_its_second_endpoint(self):
+        # The personal-usage request is best effort for transient errors only: a rate limit
+        # there must reach the collector, or the endpoint would be asked again every minute.
+        from bars_plugin.values import CollectionError
+        calls = []
+
+        def answer(url, headers, timeout=12):
+            calls.append(url)
+            if url.endswith("/usage"):
+                return {"overage_balance": 5, "weekly_percentage": 1}
+            raise CollectionError("Provider rate limit reached. Collection will retry later.", retry_after=900)
+        with patch.object(plugin("devin"), "http_json", side_effect=answer), \
+                patch.object(plugin("devin"), "access_token", return_value="synthetic"), \
+                patch.object(plugin("devin"), "command", return_value=json.dumps({"org_id": "org_synthetic"})), \
+                patch.object(plugin("devin"), "cli", return_value="/usr/bin/true"):
+            with self.assertRaises(CollectionError) as caught:
+                plugin("devin").collect()
+        self.assertEqual(caught.exception.retry_after, 900)
+        self.assertEqual(len(calls), 2)
 
     def assert_only_own_secrets(self, request, own):
         headers = request.header_items()

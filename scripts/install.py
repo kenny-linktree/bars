@@ -72,6 +72,19 @@ def is_private_directory(path: Path) -> bool:
     return stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
 
 
+def private_destination(path: Path, roots: tuple[Path, ...]) -> bool:
+    """Every directory between `path` and one of `roots` (inclusive) is a real directory this
+    user owns. Checking only the parent would miss `plugins/` itself replaced by a link, which
+    makes `plugins/claude` look like a real directory while living somewhere else."""
+    directory = path.parent
+    while True:
+        if not is_private_directory(directory):
+            return False
+        if directory in roots or directory.parent == directory:
+            return directory in roots
+        directory = directory.parent
+
+
 def private_directory(path: Path) -> None:
     """Create `path` or tighten an existing one to 0700, refusing anything but a real directory this user owns."""
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -506,10 +519,11 @@ def install(app: Path, python: Path, *, start: bool = True,
                     if not directory.exists():
                         created_directories.append(directory)
                     private_directory(directory)
+                roots = (support, agents)
                 for path, (data, mode) in files.items():
-                    # A destination directory replaced by a link since the preflight would
-                    # redirect the write into whatever it points at; refuse rather than follow it.
-                    if not is_private_directory(path.parent):
+                    # A destination directory, or any directory above it, replaced by a link since
+                    # the preflight would redirect the write into whatever it points at; refuse.
+                    if not private_destination(path, roots):
                         raise RuntimeError(f"{path.parent} changed during installation; nothing was written there.")
                     written.append(path)
                     atomic_write(path, data, mode)
@@ -527,7 +541,7 @@ def install(app: Path, python: Path, *, start: bool = True,
                 # Restore only what this run wrote, and never through a directory that became
                 # a link meanwhile: that would edit whatever the link points at.
                 for path in reversed(written):
-                    if not is_private_directory(path.parent):
+                    if not private_destination(path, (support, agents)):
                         continue
                     previous = previous_files[path]
                     if previous is None:
