@@ -64,7 +64,7 @@ For command-line selection, see [provider options](docs/distribution.md#provider
 
 ## Adding a provider
 
-Each provider is a plugin: a directory with a small manifest and one Python module under `~/Library/Application Support/Bars/plugins`. Claude, Codex, Cursor and Devin are the standard plugins; add your own for any other service by writing a plugin there, with no change to Bars. Each plugin runs in its own bounded worker process, so a faulty plugin affects only its own row. Updates refresh the standard plugins but keep any file you edited. See [provider plugins](docs/plugins.md) for the interface.
+Each provider is a plugin: a directory with a small manifest and one Python module under `~/Library/Application Support/Bars/plugins`. Claude, Codex, Cursor and Devin are the standard plugins; add your own for any other service by writing a plugin there, with no change to Bars. Each plugin runs in its own bounded worker process, so a faulty plugin affects only its own row. Updates refresh the standard plugins but keep any file you edited. See [provider plugins](docs/plugins.md) for the interface. Releases are tags on `main`; see [CHANGELOG.md](CHANGELOG.md).
 
 ## Updating
 
