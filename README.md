@@ -33,6 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/kenny-linktree/bars/main/scripts/bo
 
 The command downloads the complete script before running it. To inspect it first, run the `curl` part on its own, then the `sh` part.
 
+It installs the latest release (`main`; every release is tagged and listed in [CHANGELOG.md](CHANGELOG.md)). To install or update to a specific release instead, put its tag in front of the `sh` part, for example `BARS_REF=v2 sh ~/Downloads/bars-bootstrap.sh`. Running the command again later updates to the latest release unless `BARS_REF` is given.
+
 The installer builds Bars on your Mac, places it in `/Applications`, starts background collection and opens the menu bar app. The build is ad-hoc signed, without Developer ID signing or notarization. See [installation details](docs/distribution.md) for paths, options and signing limitations.
 
 To add the widget, right-click the desktop, choose **Edit Widgets**, search for Bars and add the large widget.

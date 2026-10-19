@@ -10,7 +10,7 @@ The repository and branch are the trust boundary: each Mac builds whatever it fe
 
 ## Repository
 
-`scripts/bootstrap.sh` and the README install from `kenny-linktree/bars`. A fork changes that default in both places. `BARS_REPO_URL` and `BARS_REF` (a branch) override the repository and branch without editing the script.
+`scripts/bootstrap.sh` and the README install from `kenny-linktree/bars`. A fork changes that default in both places. `BARS_REPO_URL` and `BARS_REF` (a branch or a release tag, default `main`) override the repository and ref without editing the script. Without `BARS_REF` the command installs the latest release, since every merge to `main` is tagged; `BARS_REF=v2` pins a release, and a later run without it returns to the latest.
 
 ## What the bootstrap does
 

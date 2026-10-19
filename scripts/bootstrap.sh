@@ -41,7 +41,7 @@ Apple's Command Line Tools and installs it. Other options go to scripts/install.
   --uninstall    Remove Bars, its scheduled collector and its data.
   --keep-data    With --uninstall, keep ~/Library/Application Support/Bars.
 
-Environment: BARS_REPO_URL (repository to clone), BARS_REF (branch, default main).
+Environment: BARS_REPO_URL (repository to clone), BARS_REF (branch or release tag, default main).
 EOF
 }
 
@@ -61,7 +61,7 @@ check_inputs() {
     '' | -*) fail "BARS_REPO_URL is not a repository URL." ;;
   esac
   case $REF in
-    '' | -* | *..* | *[!A-Za-z0-9._/-]*) fail "BARS_REF must be a branch name." ;;
+    '' | -* | *..* | *[!A-Za-z0-9._/-]*) fail "BARS_REF must be a branch or tag name." ;;
   esac
 }
 
