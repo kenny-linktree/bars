@@ -5,8 +5,18 @@ from pathlib import Path
 from bars_plugin import CollectionError, http_json, login_found, metric, read_json, result, token
 
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
-# The session window's length is not reported, so it carries no period.
+# The response reports each window's length as `limit_window_seconds`; the documented lengths
+# map to allowance periods. Without the field a window keeps its documented default (session:
+# none, weekly: `week`); an unmappable or malformed length means no period rather than a wrong one.
 WINDOWS = (("primary_window", "Session quota", None), ("secondary_window", "Weekly quota", "week"))
+WINDOW_PERIODS = {5 * 3_600: "five_hours", 7 * 86_400: "week"}
+
+
+def window_period(quota, fallback):
+    seconds = quota.get("limit_window_seconds")
+    if seconds is None:
+        return fallback
+    return WINDOW_PERIODS.get(seconds) if isinstance(seconds, int) and not isinstance(seconds, bool) else None
 
 
 def obj(value):
@@ -33,11 +43,11 @@ def parse(data):
                               budget.get("used"), budget.get("limit"), remaining, reset=budget.get("reset_at"),
                               period="month"))
     limits = obj(data.get("rate_limit"))
-    for key, label, period in WINDOWS:
+    for key, label, fallback in WINDOWS:
         quota = obj(limits.get(key))
         if quota.get("used_percent") is not None:
             metrics.append(metric(key, label, "quota", "individual", "%", quota["used_percent"], 100,
-                                  reset=quota.get("reset_at"), period=period))
+                                  reset=quota.get("reset_at"), period=window_period(quota, fallback)))
     value = result("monthly_credits", metrics, alternatives=[key for key, _, _ in WINDOWS])
     # Quota-only accounts show the other window as a mini bar beneath the primary.
     if value["primary_metric_id"] != "monthly_credits":

@@ -85,6 +85,26 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(metric["limit"], None if limit is None else 0)
             self.assertEqual(metric["remaining"], None if limit is None else 0)
 
+    def test_codex_windows_take_periods_from_reported_lengths(self):
+        # Ported from PR #2: the live response carries limit_window_seconds and epoch reset_at.
+        value = parse_codex({"rate_limit": {
+            "primary_window": {"used_percent": 100, "limit_window_seconds": 5 * 3_600, "reset_at": 1791011563},
+            "secondary_window": {"used_percent": 27, "limit_window_seconds": 7 * 86_400, "reset_at": 1791580340}}})
+        by_id = {m["id"]: m for m in value["metrics"]}
+        self.assertEqual(by_id["primary_window"]["period"], "five_hours")
+        self.assertEqual(by_id["primary_window"]["resets_at"], "2026-10-03T07:12:43Z")
+        self.assertEqual(by_id["secondary_window"]["period"], "week")
+        self.assertEqual(by_id["secondary_window"]["resets_at"], "2026-10-09T21:12:20Z")
+        # Without a reported length each window keeps its documented default.
+        value = parse_codex({"rate_limit": {"primary_window": {"used_percent": 1}, "secondary_window": {"used_percent": 1}}})
+        self.assertEqual([m["period"] for m in value["metrics"]], [None, "week"])
+        # An undocumented or malformed length carries no period rather than a wrong one.
+        value = parse_codex({"rate_limit": {"primary_window": {"used_percent": 10, "limit_window_seconds": 3_600},
+                                             "secondary_window": {"used_percent": 10, "limit_window_seconds": "soon"}}})
+        self.assertEqual([m["period"] for m in value["metrics"]], [None, None])
+        value = parse_codex({"rate_limit": {"primary_window": {"used_percent": 10, "limit_window_seconds": True}}})
+        self.assertEqual([m["period"] for m in value["metrics"]], [None])
+
     def test_codex_subscription_uses_session_quota(self):
         value = parse_codex({"rate_limit": {"primary_window": {"used_percent": 20}}})
         self.assertEqual(value["primary_metric_id"], "primary_window")
