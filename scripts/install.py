@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,16 @@ import time
 LABEL = "local.bars.collector"
 BUNDLE_IDENTIFIER = "local.bars.app"
 PROJECT = Path(__file__).resolve().parents[1]
-PROVIDERS = {"claude": "Claude", "codex": "Codex", "cursor": "Cursor", "devin": "Devin"}
+# The standard plugins shipped with Bars. Each is a directory under plugins/ that the
+# installer copies into the per-user plugins directory; see docs/plugins.md.
+STANDARD_PLUGINS = PROJECT / "plugins"
+PLUGIN_ID = re.compile(r"[a-z][a-z0-9_]{0,31}")
+# What the installer last wrote for each standard plugin file, so an update can tell a
+# locally edited file (kept) from an unmodified one (replaced).
+PLUGIN_RECORD = ".installed.json"
+# The on-disk layout this installer writes. 1: the first release (no plugins directory,
+# schema-1 snapshots). 2: plugins directory, plugins_path, per-minute schedule, schema 2.
+LAYOUT_VERSION = 2
 MINIMUM_PYTHON = (3, 9)
 # The same allowlist is used by the installed refresh runner and credential tools.
 CHILD_ENVIRONMENT = (
@@ -62,6 +72,19 @@ def is_private_directory(path: Path) -> bool:
     return stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
 
 
+def private_destination(path: Path, roots: tuple[Path, ...]) -> bool:
+    """Every directory between `path` and one of `roots` (inclusive) is a real directory this
+    user owns. Checking only the parent would miss `plugins/` itself replaced by a link, which
+    makes `plugins/claude` look like a real directory while living somewhere else."""
+    directory = path.parent
+    while True:
+        if not is_private_directory(directory):
+            return False
+        if directory in roots or directory.parent == directory:
+            return directory in roots
+        directory = directory.parent
+
+
 def private_directory(path: Path) -> None:
     """Create `path` or tighten an existing one to 0700, refusing anything but a real directory this user owns."""
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -73,9 +96,13 @@ def private_directory(path: Path) -> None:
 def launch_agent(refresh: Path, support: Path) -> dict:
     return {
         "Label": LABEL,
-        "ProgramArguments": [str(refresh)],
+        "ProgramArguments": [str(refresh), "--scheduled"],
         "RunAtLoad": True,
-        "StartCalendarInterval": [{"Minute": minute} for minute in (0, 15, 30, 45)],
+        # Once a minute: an empty calendar entry matches every minute (missing fields are
+        # wildcards). Calendar firings missed during sleep are coalesced into one run on wake;
+        # StartInterval firings would be dropped (launchd.plist(5)). The runner adds its own
+        # jitter and skips a run while another holds the lock.
+        "StartCalendarInterval": [{}],
         "ProcessType": "Background",
         "LowPriorityIO": True,
         "ThrottleInterval": 30,
@@ -182,41 +209,128 @@ def refresh_lock(support: Path, timeout: float = REFRESH_LOCK_WAIT_SECONDS):
         yield
 
 
-def detect_logins(python: Path, path: str) -> dict[str, bool] | None:
-    """Ask the collector which providers have local login material. None if it fails.
+def standard_plugin_ids(source: Path = STANDARD_PLUGINS) -> list[str]:
+    try:
+        return sorted(name for name in os.listdir(source) if PLUGIN_ID.fullmatch(name) and (source / name).is_dir())
+    except FileNotFoundError:
+        return []
 
-    Runs the source checkout's collector through the chosen interpreter with the same
-    PATH the scheduled job receives, so the Devin CLI lookup matches collection.
+
+def detect_logins(python: Path, path: str, plugins: Path = STANDARD_PLUGINS) -> dict[str, bool] | None:
+    """Ask the collector which standard plugins find local login material. None if it fails.
+
+    Runs the source checkout's collector and plugins through the chosen interpreter with
+    the same PATH the scheduled job receives, so the Devin CLI lookup matches collection.
+    Each plugin answers in its own worker process, so a broken plugin counts as not found.
     """
     env = {key: os.environ[key] for key in CHILD_ENVIRONMENT if key in os.environ}
     env.update(HOME=str(user_home()), PATH=path, PYTHONPATH=str(PROJECT / "collector"),
                PYTHONDONTWRITEBYTECODE="1")
     try:
-        result = subprocess.run([str(python), "-m", "bars_collector", "--detect"], env=env,
-                                cwd=str(PROJECT / "collector"), capture_output=True,
-                                stdin=subprocess.DEVNULL, timeout=60, check=False)
+        result = subprocess.run([str(python), "-m", "bars_collector", "--detect", "--plugins", str(plugins)],
+                                env=env, cwd=str(PROJECT / "collector"), capture_output=True,
+                                stdin=subprocess.DEVNULL, timeout=90, check=False)
         data = json.loads(result.stdout) if result.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, TypeError, ValueError):
         return None
-    if not isinstance(data, dict) or not all(isinstance(data.get(pid), bool) for pid in PROVIDERS):
+    if not isinstance(data, dict) or not data \
+            or not all(isinstance(pid, str) and PLUGIN_ID.fullmatch(pid) and isinstance(found, bool)
+                       for pid, found in data.items()):
         return None
-    return {pid: data[pid] for pid in PROVIDERS}
+    return dict(data)
 
 
 def choose_disabled(detected: dict[str, bool] | None, disable: list[str] | None,
                     enable_all: bool, previous: list[str] | None = None) -> list[str]:
     """Explicit flags win. Without flags, a reinstall keeps the existing selection, which the
     dropdown may have edited; only a first install disables providers without local login
-    material."""
+    material. Ids are kept in the order given, each once; the collector ignores unknown ids."""
     if enable_all:
         return []
     if disable is not None:
-        return [pid for pid in PROVIDERS if pid in disable]
+        return list(dict.fromkeys(disable))
     if previous is not None:
-        return [pid for pid in PROVIDERS if pid in previous]
+        return list(dict.fromkeys(previous))
     if detected is None:
         return []  # Keep every provider visible rather than hiding one by mistake.
-    return [pid for pid in PROVIDERS if not detected[pid]]
+    return [pid for pid, found in detected.items() if not found]
+
+
+def file_digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def read_plugin_record(target: Path) -> dict[str, str]:
+    try:
+        record = json.loads((target / PLUGIN_RECORD).read_bytes())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    return {key: value for key, value in record.items() if isinstance(key, str) and isinstance(value, str)}
+
+
+def plan_plugin_sync(source: Path, target: Path) -> tuple[dict[Path, tuple[bytes, int]], list[str]]:
+    """Which standard plugin files to write into `target`, and which local edits are being kept.
+
+    A file is replaced when it is missing or still exactly what the installer last wrote
+    (or, without a record, already identical to the shipped file). A file that differs from
+    both is a local edit and is left alone. Files the person added, plugins they wrote and
+    a plugin directory that is a link are never touched. The record only ever gains the
+    digests of files actually written, so a kept edit stays "modified" on the next update.
+    """
+    record = read_plugin_record(target)
+    writes: dict[Path, tuple[bytes, int]] = {}
+    kept: list[str] = []
+    for pid in standard_plugin_ids(source):
+        if (target / pid).is_symlink():
+            kept.append(f"{pid} (a link, managed by you)")
+            continue
+        for shipped in sorted(path for path in (source / pid).rglob("*") if path.is_file()):
+            relative = shipped.relative_to(source)
+            if "__pycache__" in relative.parts or shipped.suffix == ".pyc":
+                continue
+            data = shipped.read_bytes()
+            installed = target / relative
+            key = relative.as_posix()
+            if installed.is_symlink():
+                kept.append(f"{key} (a link, managed by you)")
+                continue
+            try:
+                current = installed.read_bytes()
+            except FileNotFoundError:
+                current = None  # Missing: install it.
+            except OSError:
+                kept.append(f"{key} (unreadable)")
+                continue
+            if current is not None and current != data and file_digest(current) != record.get(key, file_digest(data)):
+                kept.append(key)
+                continue
+            writes[installed] = (data, 0o600)
+            record[key] = file_digest(data)
+    writes[target / PLUGIN_RECORD] = ((json.dumps(record, indent=2, sort_keys=True) + "\n").encode(), 0o600)
+    return writes, kept
+
+
+def source_commit() -> str | None:
+    """The checkout's commit, or None when the installer runs outside a Git checkout."""
+    try:
+        result = subprocess.run(["/usr/bin/git", "-C", str(PROJECT), "rev-parse", "HEAD"], capture_output=True,
+                                text=True, stdin=subprocess.DEVNULL, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    output = result.stdout
+    commit = (output.decode(errors="replace") if isinstance(output, bytes) else output or "").strip()
+    return commit if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", commit) else None
+
+
+def previous_config(config_path: Path) -> dict:
+    """An existing installation's settings object, or an empty one when there is none."""
+    try:
+        previous = json.loads(config_path.read_bytes())
+    except (OSError, ValueError):
+        return {}
+    return previous if isinstance(previous, dict) else {}
 
 
 def previous_disabled(config_path: Path) -> list[str] | None:
@@ -230,11 +344,20 @@ def previous_disabled(config_path: Path) -> list[str] | None:
     return None
 
 
+def plugin_name(pid: str, source: Path = STANDARD_PLUGINS) -> str:
+    """The display name from a standard plugin's manifest, or its id when that cannot be read."""
+    try:
+        name = json.loads((source / pid / "plugin.json").read_bytes()).get("name")
+    except (OSError, ValueError, AttributeError):
+        return pid
+    return name if isinstance(name, str) and name.strip() else pid
+
+
 def provider_summary(detected: dict[str, bool] | None, disabled: list[str]) -> list[str]:
     lines = []
-    for pid, name in PROVIDERS.items():
+    for pid in (list(detected) if detected else standard_plugin_ids()):
         login = "login not checked" if detected is None else ("login found" if detected[pid] else "no login found")
-        lines.append(f"  {name}: {login}, {'disabled' if pid in disabled else 'enabled'}")
+        lines.append(f"  {plugin_name(pid)}: {login}, {'disabled' if pid in disabled else 'enabled'}")
     return lines
 
 
@@ -291,9 +414,11 @@ def install(app: Path, python: Path, *, start: bool = True,
         raise RuntimeError(f"{destination} belongs to another user account on this Mac. "
                            "Install and update Bars from the account that installed it, "
                            "or have that account uninstall it first.")
-    package = PROJECT / "collector/bars_collector"
-    if not package.is_dir():
+    packages = [PROJECT / "collector/bars_collector", PROJECT / "collector/bars_plugin"]
+    if not all(package.is_dir() for package in packages):
         raise RuntimeError("Collector package is missing.")
+    if not standard_plugin_ids():
+        raise RuntimeError("Standard plugins are missing.")
     version_check = subprocess.run([str(python), "-c", "import sys; sys.exit(sys.version_info < %r)" % (MINIMUM_PYTHON,)],
                                    check=False)
     if version_check.returncode:
@@ -303,7 +428,8 @@ def install(app: Path, python: Path, *, start: bool = True,
     subprocess.run([str(app / "Contents/MacOS" / info["CFBundleExecutable"]),
                     "--check-storage"], check=True, timeout=20)
     os.umask(0o077)
-    for directory in (support, support / "logs", support / "bin"):
+    plugins = support / "plugins"
+    for directory in (support, support / "logs", support / "bin", plugins):
         private_directory(directory)
     # launchd would create its log with mode 0644; create it, or tighten it, first. Each
     # install also empties it, so it cannot grow without bound across reinstalls.
@@ -325,18 +451,20 @@ def install(app: Path, python: Path, *, start: bool = True,
         str(user_home() / ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin",
         "/usr/bin", "/bin", "/usr/sbin", "/sbin",
     ]
-    config = {"python": str(python), "collector_path": str(runtime),
-              "app_executable": str(executable), "path": ":".join(dict.fromkeys(search_dirs))}
+    config = {"python": str(python), "collector_path": str(runtime), "plugins_path": str(plugins),
+              "app_executable": str(executable), "path": ":".join(dict.fromkeys(search_dirs)),
+              # What wrote this file, so a later installer can tell which layout it is updating
+              # and a person can see which code is installed without inspecting the clone.
+              "layout_version": LAYOUT_VERSION, "installed_commit": source_commit()}
     detected = detect_logins(python, config["path"])
-    # The app also edits this list in place; refresh.py reads it on every run.
-    config["disabled_providers"] = choose_disabled(detected, disable, enable_all,
-                                                   previous=previous_disabled(config_path))
     launcher = f'#!/bin/sh\nexec {shlex.quote(str(python))} {shlex.quote(str(runtime / "refresh.py"))} "$@"\n'
     files = {
-        config_path: (json.dumps(config, indent=2).encode(), 0o600),
         refresh: (launcher.encode(), 0o700),
         plist_path: (plistlib.dumps(launch_agent(refresh, support)), 0o600),
     }
+    kept_plugin_files: list[str] = []
+    created_directories: list[Path] = []
+    written: list[Path] = []
     app_stage = Path(tempfile.mkdtemp(prefix=".bars-install-", dir=destination.parent))
     runtime_stage = Path(tempfile.mkdtemp(prefix=".install-", dir=support))
     may_remove_staging = True
@@ -346,8 +474,9 @@ def install(app: Path, python: Path, *, start: bool = True,
     try:
         shutil.copytree(app, app_stage / "new.app")
         new_runtime = runtime_stage / "new-runtime"
-        shutil.copytree(package, new_runtime / "bars_collector",
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        for package in packages:
+            shutil.copytree(package, new_runtime / package.name,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         shutil.copy2(PROJECT / "integration/refresh.py", new_runtime / "refresh.py")
         subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict",
                         str(app_stage / "new.app")], check=True)
@@ -356,6 +485,18 @@ def install(app: Path, python: Path, *, start: bool = True,
                 old_info = plistlib.loads((destination / "Contents/Info.plist").read_bytes())
                 if old_info.get("CFBundleIdentifier") != info["CFBundleIdentifier"]:
                     raise RuntimeError("An unrelated application already occupies the destination.")
+            # Standard plugins are ordinary files in the plugins directory, written and rolled
+            # back with the other installed files. Plan them here, under the lock and just
+            # before writing, so an edit made while the installer waited is still kept.
+            plugin_files, kept_plugin_files = plan_plugin_sync(STANDARD_PLUGINS, plugins)
+            files.update(plugin_files)
+            # Settings are read here too: the app edits `disabled_providers` in place, and a
+            # provider hidden while the installer waited for the lock must stay hidden. Keys this
+            # installer does not know are carried over unchanged.
+            config = {**previous_config(config_path), **config}
+            config["disabled_providers"] = choose_disabled(detected, disable, enable_all,
+                                                           previous=previous_disabled(config_path))
+            files[config_path] = (json.dumps(config, indent=2).encode(), 0o600)
             previous_files = {path: ((path.read_bytes(), path.stat().st_mode & 0o777)
                                      if path.exists() else None) for path in files}
             was_loaded = subprocess.run(["/bin/launchctl", "print", service],
@@ -374,7 +515,17 @@ def install(app: Path, python: Path, *, start: bool = True,
                         live.rename(old)
                     switched.append((live, old))
                     new.rename(live)
+                for directory in dict.fromkeys(path.parent for path in plugin_files):
+                    if not directory.exists():
+                        created_directories.append(directory)
+                    private_directory(directory)
+                roots = (support, agents)
                 for path, (data, mode) in files.items():
+                    # A destination directory, or any directory above it, replaced by a link since
+                    # the preflight would redirect the write into whatever it points at; refuse.
+                    if not private_destination(path, roots):
+                        raise RuntimeError(f"{path.parent} changed during installation; nothing was written there.")
+                    written.append(path)
                     atomic_write(path, data, mode)
                 subprocess.run(["/usr/bin/plutil", "-lint", str(plist_path)], check=True)
                 register_app(destination)
@@ -387,11 +538,23 @@ def install(app: Path, python: Path, *, start: bool = True,
                         shutil.rmtree(live)
                     if old.exists():
                         old.rename(live)
-                for path, previous in previous_files.items():
+                # Restore only what this run wrote, and never through a directory that became
+                # a link meanwhile: that would edit whatever the link points at.
+                for path in reversed(written):
+                    if not private_destination(path, (support, agents)):
+                        continue
+                    previous = previous_files[path]
                     if previous is None:
                         path.unlink(missing_ok=True)
                     else:
                         atomic_write(path, *previous)
+                # Directories this install created, and only those still empty: an empty
+                # plugin directory would otherwise show up as a broken provider.
+                for directory in reversed(created_directories):
+                    try:
+                        directory.rmdir()
+                    except OSError:
+                        pass
                 if destination.exists():
                     register_app(destination)
                 if was_loaded:
@@ -399,13 +562,24 @@ def install(app: Path, python: Path, *, start: bool = True,
                 may_remove_staging = True
                 raise
             may_remove_staging = True
-            # The files are in place. Processes still running the previous code are replaced
-            # while the refresh lock is held, so no publication races the restart.
-            warnings = restart_user_interfaces(destination, executable,
-                                               relaunch_app=start or app_was_running)
+            # The files are in place: from here on a failure to restart or start a process is a
+            # warning, never a failed installation, however it surfaces.
+            warnings = []
+            try:
+                # Processes still running the previous code are replaced while the refresh
+                # lock is held, so no publication races the restart.
+                warnings = restart_user_interfaces(destination, executable,
+                                                   relaunch_app=start or app_was_running)
+            except (OSError, subprocess.SubprocessError):
+                warnings.append("The widget and menu bar app could not be restarted; log out and in, or open Bars, to finish.")
         # RunAtLoad may have fired while installation held the refresh lock.
         if start:
-            subprocess.run(["/bin/launchctl", "kickstart", service], check=True)
+            try:
+                started = subprocess.run(["/bin/launchctl", "kickstart", service], check=False, **quiet).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                started = False
+            if not started:
+                warnings.append("The first collection could not be started; it runs at the next minute or on Refresh now.")
     finally:
         # If rollback itself fails, retain backup directories for recovery.
         if may_remove_staging:
@@ -413,15 +587,19 @@ def install(app: Path, python: Path, *, start: bool = True,
             shutil.rmtree(runtime_stage)
     print(f"Installed {destination}")
     print(f"Collector launcher: {refresh}")
-    print("Schedule: every quarter hour, with missed refreshes resumed after wake.")
+    print("Schedule: every minute while awake, with a missed refresh resumed after wake.")
     print("Widget extension restarted and timeline reload requested."
           + (" Menu bar app launched." if start or app_was_running else ""))
+    print(f"Plugins: {plugins}")
     print("Providers:")
     for line in provider_summary(detected, config["disabled_providers"]):
         print(line)
     print(CHANGE_HINT)
     if detected is None:
         warnings.append("Login detection did not run, so no provider was disabled automatically.")
+    for kept in kept_plugin_files:
+        warnings.append(f"Kept your modified plugin file {kept}; the shipped version was not applied. "
+                        "Delete it and reinstall to restore the shipped version.")
     for warning in warnings:
         print(f"Warning: {warning}", file=sys.stderr)
 
@@ -521,13 +699,19 @@ def uninstall(*, keep_data: bool = False, destination: Path | None = None,
     return removed
 
 
+def provider_id(value: str) -> str:
+    if not PLUGIN_ID.fullmatch(value):
+        raise argparse.ArgumentTypeError("provider ids are lowercase letters, digits and underscores")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, default=PROJECT / ".build/native/Release/Bars.app")
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--no-start", action="store_true")
-    parser.add_argument("--disable", action="append", choices=list(PROVIDERS), metavar="ID",
-                        help="Disable this provider (claude, codex, cursor or devin). Repeatable. "
+    parser.add_argument("--disable", action="append", type=provider_id, metavar="ID",
+                        help="Disable this provider, such as claude, codex, cursor or devin. Repeatable. "
                              "Without --disable or --enable-all, providers with no local login are disabled.")
     parser.add_argument("--enable-all", action="store_true", help="Enable every provider, whatever is detected.")
     parser.add_argument("--uninstall", action="store_true",

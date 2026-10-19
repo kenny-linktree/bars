@@ -123,21 +123,20 @@ enum InstallationSettings {
         try SnapshotStore.sharedURL().deletingLastPathComponent().appendingPathComponent(fileName)
     }
 
-    /// Hidden providers named in the settings. Unknown IDs from a newer collector are ignored.
+    /// Hidden providers named in the settings. Entries that are not valid provider ids are ignored.
     static func disabledProviders(in data: Data) throws -> Set<ProviderID> {
         Set(try disabledIDs(in: object(from: data)).compactMap(ProviderID.init(rawValue:)))
     }
 
-    /// Read-modify-write of the settings: every other key and unknown ID is kept; known IDs are
-    /// listed once, in contract order. Malformed settings throw rather than being overwritten.
+    /// Read-modify-write of the settings: every other key and every other entry is kept in its
+    /// order, each listed once; a newly hidden provider is appended. Malformed settings throw
+    /// rather than being overwritten.
     static func updating(_ data: Data, provider: ProviderID, hidden: Bool) throws -> Data {
         var settings = try object(from: data)
-        let current = try disabledIDs(in: settings)
-        var known = Set(current.compactMap(ProviderID.init(rawValue:)))
-        if hidden { known.insert(provider) } else { known.remove(provider) }
-        var unknown: [String] = []
-        for id in current where ProviderID(rawValue: id) == nil && !unknown.contains(id) { unknown.append(id) }
-        settings[disabledProvidersKey] = ProviderID.allCases.filter { known.contains($0) }.map(\.rawValue) + unknown
+        var ids: [String] = []
+        for id in try disabledIDs(in: settings) where id != provider.rawValue && !ids.contains(id) { ids.append(id) }
+        if hidden { ids.append(provider.rawValue) }
+        settings[disabledProvidersKey] = ids
         var output = try JSONSerialization.data(withJSONObject: settings,
                                                 options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         output.append(0x0A)

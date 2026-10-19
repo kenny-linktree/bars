@@ -45,17 +45,19 @@ def write(completed):
     )
     publisher.chmod(0o700)
     config = {"python": sys.executable, "collector_path": str(package.parent),
-              "app_executable": str(publisher)}
+              "plugins_path": str(ROOT / "plugins"), "app_executable": str(publisher)}
+    standard = sorted(p.name for p in (ROOT / "plugins").iterdir() if p.is_dir())
     if scenario == "disabled_noop":
         # All four providers are disabled before either invocation. No credential
         # lookup, provider worker, network call or native process can run here.
         config["collector_path"] = str(ROOT / "collector")
-        config["disabled_providers"] = list(refresh.PROVIDERS)
+        config["disabled_providers"] = standard
         env = refresh.child_environment()
         env["PYTHONPATH"] = config["collector_path"]
         env["PYTHONDONTWRITEBYTECODE"] = "1"
-        args = [sys.executable, "-m", "bars_collector", "--output", str(directory / "snapshot.json")]
-        for provider in refresh.PROVIDERS:
+        args = [sys.executable, "-m", "bars_collector", "--output", str(directory / "snapshot.json"),
+                "--plugins", str(ROOT / "plugins")]
+        for provider in standard:
             args += ["--disable", provider]
         subprocess.run(args, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, check=True, timeout=10)

@@ -6,9 +6,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from bars_collector import adapters, toml_subset
-from bars_collector.model import CollectionError
-from bars_collector.toml_subset import TOMLSubsetError
+from bars_plugin import CollectionError, toml_subset
+from bars_plugin.toml_subset import TOMLSubsetError
+from plugin_fixtures import plugin
 
 # Same shape as the Devin CLI's credentials.toml, with synthetic values.
 DEVIN_SHAPE = (
@@ -129,11 +129,11 @@ class DevinCredentialFileTests(unittest.TestCase):
 
     def test_reads_token_from_flat_file(self):
         self.write(DEVIN_SHAPE)
-        self.assertEqual(adapters.devin_access_token(), "synthetic-key_0123456789")
+        self.assertEqual(plugin("devin").access_token(), "synthetic-key_0123456789")
 
     def test_missing_file_needs_setup(self):
         with self.assertRaises(CollectionError) as raised:
-            adapters.devin_access_token()
+            plugin("devin").access_token()
         self.assertEqual(raised.exception.status, "setup")
 
     def test_unsupported_syntax_needs_login_without_leaking(self):
@@ -142,7 +142,7 @@ class DevinCredentialFileTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.write(text)
                 with self.assertRaises(CollectionError) as raised:
-                    adapters.devin_access_token()
+                    plugin("devin").access_token()
                 self.assertEqual(raised.exception.status, "login_required")
                 self.assertNotIn("synthetic", json.dumps(str(raised.exception)))
 

@@ -67,6 +67,7 @@ class RefreshIntegrationTests(unittest.TestCase):
 import argparse, json, os, pathlib, time
 p = argparse.ArgumentParser()
 p.add_argument('--output')
+p.add_argument('--plugins')
 p.add_argument('--provider')
 args = p.parse_args()
 path = pathlib.Path(args.output)
@@ -115,6 +116,7 @@ for completed in (1, 2):
 import argparse, json, pathlib, time
 p = argparse.ArgumentParser()
 p.add_argument('--output')
+p.add_argument('--plugins')
 p.add_argument('--provider')
 p.add_argument('--disable', action='append', default=[])
 args = p.parse_args()
@@ -336,6 +338,26 @@ pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps({'s
         self.assertEqual((self.directory / "snapshot.json").read_text(), old)
         self.assertFalse((self.directory / "published.jsonl").exists())
 
+    def test_size_bound_exit_status_matches_the_collector(self):
+        # refresh.py runs the collector as a subprocess, so it keeps its own copy of the status.
+        import importlib
+        sys.path.insert(0, str(ROOT / "collector"))
+        try:
+            collector_main = importlib.import_module("bars_collector.__main__")
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(refresh.SNAPSHOT_TOO_LARGE_STATUS, collector_main.SNAPSHOT_TOO_LARGE_STATUS)
+
+    def test_snapshot_size_exit_status_is_explained_in_the_log(self):
+        # The collector's stderr is never forwarded; a dedicated status carries the one
+        # condition a person has to act on (too many plugins for one snapshot file).
+        self.script("raise SystemExit(%d)" % refresh.SNAPSHOT_TOO_LARGE_STATUS)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 1)
+        log = (self.directory / "logs/refresh.log").read_text()
+        self.assertIn("exceed the snapshot size bound", log)
+        self.assertIn("Remove some plugins", log)
+
     def test_uses_installed_cli_path_without_interactive_shell_environment(self):
         cli_directory = self.directory / "cli"
         cli_directory.mkdir()
@@ -365,7 +387,8 @@ pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text('{}')
 
     def test_real_disabled_collector_retries_failed_publication_without_rewriting_snapshot(self):
         self.config["collector_path"] = str(ROOT / "collector")
-        self.config["disabled_providers"] = list(refresh.PROVIDERS)
+        self.config["plugins_path"] = str(ROOT / "plugins")
+        self.config["disabled_providers"] = ["claude", "codex", "cursor", "devin"]
         (self.directory / "installation.json").write_text(json.dumps(self.config))
         working_publisher = self.publisher.read_text()
         self.publisher.write_text(f"#!{sys.executable}\nraise SystemExit(4)\n")
@@ -464,8 +487,9 @@ pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps(sys
         result = self.invoke("--provider", "codex")
         self.assertEqual(result.returncode, 0, result.stderr)
         arguments = self.collector_arguments()
-        self.assertEqual(arguments[arguments.index("--provider"):],
-                         ["--provider", "codex", "--disable", "codex", "--disable", "devin"])
+        self.assertEqual(arguments[arguments.index("--plugins"):],
+                         ["--plugins", str(self.directory / "plugins"), "--provider", "codex",
+                          "--disable", "devin", "--disable", "codex"])
         # The app edits the file in place; the next run must see the change.
         self.config["disabled_providers"] = []
         (self.directory / "installation.json").write_text(json.dumps(self.config))
@@ -480,17 +504,17 @@ pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps(sys
 
     def test_invalid_disabled_providers_collects_everything_and_logs(self):
         self.record_arguments_collector()
-        for value in ("cursor", [1], ["cursor", "unknown"]):
+        for value in ("cursor", [1], ["cursor", "Not-Valid"]):
             with self.subTest(value=value):
                 self.config["disabled_providers"] = value
                 (self.directory / "installation.json").write_text(json.dumps(self.config))
                 self.assertEqual(self.invoke().returncode, 0)
-                expected = ["--disable", "cursor"] if value == ["cursor", "unknown"] else []
+                expected = ["--disable", "cursor"] if value == ["cursor", "Not-Valid"] else []
                 arguments = self.collector_arguments()
-                self.assertEqual(arguments[arguments.index("--output") + 2:], expected)
+                self.assertEqual(arguments[arguments.index("--plugins") + 2:], expected)
         log = (self.directory / "logs/refresh.log").read_text()
         self.assertIn("Ignoring invalid disabled_providers", log)
-        self.assertIn("Ignoring unknown disabled providers: unknown.", log)
+        self.assertIn("Ignoring invalid disabled provider ids: Not-Valid.", log)
 
     def test_collector_output_and_snapshot_contents_never_reach_logs(self):
         self.script("""
@@ -576,7 +600,7 @@ sys.exit(refresh.main())
         self.assertEqual(self.invoke().returncode, 0)
         log = (self.directory / "logs/refresh.log").read_text()
         self.assertNotIn("forged", log)
-        self.assertIn("Ignoring unknown disabled providers: (invalid).", log)
+        self.assertIn("Ignoring invalid disabled provider ids: (invalid).", log)
 
     def test_symlinked_settings_or_lock_run_nothing(self):
         self.script("raise RuntimeError('Must not run')")
@@ -608,14 +632,89 @@ sys.exit(refresh.main())
         self.assertIn("PermissionError", result.stderr)
         self.assertFalse((self.directory / "logs").exists())
 
-    def test_schedule_is_quarter_hour_calendar_with_login_start(self):
+    def test_schedule_is_every_minute_with_login_start_and_scheduled_flag(self):
         data = installer.launch_agent(self.directory / "bin/refresh", self.directory)
         decoded = plistlib.loads(plistlib.dumps(data))
-        self.assertEqual(decoded["StartCalendarInterval"],
-                         [{"Minute": 0}, {"Minute": 15}, {"Minute": 30}, {"Minute": 45}])
+        # An empty calendar entry fires every minute and, unlike StartInterval, is coalesced
+        # into one run after sleep rather than dropped.
+        self.assertEqual(decoded["StartCalendarInterval"], [{}])
+        self.assertNotIn("StartInterval", decoded)
         self.assertTrue(decoded["RunAtLoad"])
         self.assertNotIn("KeepAlive", decoded)
-        self.assertEqual(decoded["ProgramArguments"], [str(self.directory / "bin/refresh")])
+        self.assertLess(decoded["ThrottleInterval"], 60)
+        self.assertEqual(decoded["ProgramArguments"], [str(self.directory / "bin/refresh"), "--scheduled"])
+
+    def test_scheduled_runs_jitter_and_never_combine_with_wait(self):
+        waits = []
+        self.assertEqual(refresh.jitter_delay(5, sleep=waits.append, draw=lambda: 0.5), 2.5)
+        self.assertEqual(refresh.jitter_delay(0, sleep=waits.append, draw=lambda: 0.5), 0.0)
+        self.assertEqual(waits, [2.5])
+        result = subprocess.run([sys.executable, str(ROOT / "integration/refresh.py"), "--support-dir",
+                                 str(self.directory), "--scheduled", "--wait"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2)
+        result = subprocess.run([sys.executable, str(ROOT / "integration/refresh.py"), "--support-dir",
+                                 str(self.directory), "--scheduled", "--jitter", "31"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2)
+
+    def test_only_scheduled_runs_ask_the_collector_to_respect_rate_limit_pauses(self):
+        self.script("""
+import json, pathlib, sys
+pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps({'argv': sys.argv[1:]}))
+""")
+        self.assertEqual(self.invoke("--scheduled", "--jitter", "0").returncode, 0)
+        self.assertIn("--respect-pauses", json.loads((self.directory / "snapshot.json").read_text())["argv"])
+        self.assertEqual(self.invoke().returncode, 0)
+        self.assertNotIn("--respect-pauses", json.loads((self.directory / "snapshot.json").read_text())["argv"])
+
+    def test_scheduled_runs_throttle_widget_reloads_and_explicit_runs_do_not(self):
+        self.script("""
+import json, pathlib, sys, time
+path = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])
+value = pathlib.Path(path.parent / 'value').read_text() if (path.parent / 'value').exists() else '1'
+path.write_text(json.dumps({'used': int(value), 'generated_at': str(time.time())}))
+""")
+        def scheduled():
+            return self.invoke("--scheduled", "--jitter", "0")
+        def events():
+            return [json.loads(line) for line in (self.directory / "published.jsonl").read_text().splitlines()]
+        # First run: nothing recorded yet, so it reloads and records the digest.
+        self.assertEqual(scheduled().returncode, 0)
+        self.assertEqual([e["reload"] for e in events()], [True])
+        state = json.loads((self.directory / refresh.WIDGET_RELOAD_STATE).read_text())
+        self.assertEqual(set(state), {"digest", "at"})
+        # Same values a minute later: published for the dropdown, but no widget reload.
+        self.assertEqual(scheduled().returncode, 0)
+        self.assertEqual([e["reload"] for e in events()], [True, False])
+        # Changed values soon after a reload still wait for the minimum interval.
+        (self.directory / "value").write_text("2")
+        self.assertEqual(scheduled().returncode, 0)
+        self.assertEqual([e["reload"] for e in events()][-1], False)
+        # Once the minimum interval has passed, a change reloads.
+        state["at"] -= refresh.WIDGET_RELOAD_MIN_SECONDS
+        (self.directory / refresh.WIDGET_RELOAD_STATE).write_text(json.dumps(state))
+        self.assertEqual(scheduled().returncode, 0)
+        self.assertEqual([e["reload"] for e in events()][-1], True)
+        self.assertEqual(events()[-1]["data"]["used"], 2)
+        # Unchanged values reload anyway after the maximum interval.
+        state = json.loads((self.directory / refresh.WIDGET_RELOAD_STATE).read_text())
+        state["at"] -= refresh.WIDGET_RELOAD_MAX_SECONDS
+        (self.directory / refresh.WIDGET_RELOAD_STATE).write_text(json.dumps(state))
+        self.assertEqual(scheduled().returncode, 0)
+        self.assertEqual([e["reload"] for e in events()][-1], True)
+        # A recorded reload time in the future (clock set back) never suppresses reloads.
+        state = json.loads((self.directory / refresh.WIDGET_RELOAD_STATE).read_text())
+        state["at"] += 86_400
+        (self.directory / refresh.WIDGET_RELOAD_STATE).write_text(json.dumps(state))
+        self.assertEqual(scheduled().returncode, 0)
+        self.assertEqual([e["reload"] for e in events()][-1], True)
+        self.assertLess(json.loads((self.directory / refresh.WIDGET_RELOAD_STATE).read_text())["at"], state["at"])
+        # An explicit refresh from the app always reloads.
+        self.assertEqual(self.invoke("--wait").returncode, 0)
+        self.assertEqual([e["reload"] for e in events()][-1], True)
+        # Timestamps alone never count as a change.
+        self.assertEqual(refresh.display_digest(self.directory / "snapshot.json"),
+                         refresh.display_digest(self.directory / "snapshot.json"))
+        self.assertIsNone(refresh.display_digest(self.directory / "missing.json"))
 
 
 class InstallationTransactionTests(unittest.TestCase):
@@ -658,7 +757,7 @@ class InstallationTransactionTests(unittest.TestCase):
         def fake_run(args, **kwargs):
             if commands is not None:
                 commands.append((args, kwargs))
-            if args[1:] == ["-m", "bars_collector", "--detect"]:
+            if args[1:4] == ["-m", "bars_collector", "--detect"]:
                 return subprocess.CompletedProcess(args, 0, stdout=json.dumps(detected).encode())
             return subprocess.CompletedProcess(args, 0)
         return fake_run
@@ -676,7 +775,13 @@ class InstallationTransactionTests(unittest.TestCase):
         config, output = self.install_and_capture(self.detecting_run(detected, commands))
         self.assertEqual(config["disabled_providers"], ["codex", "devin"])
         # The existing keys stay exactly as they were.
-        self.assertEqual(list(config), ["python", "collector_path", "app_executable", "path", "disabled_providers"])
+        self.assertEqual(list(config), ["python", "collector_path", "plugins_path", "app_executable", "path",
+                                        "layout_version", "installed_commit", "disabled_providers"])
+        self.assertEqual(config["layout_version"], 2)
+        # The fixture's fake command runner answers git with no output; the real one records the commit.
+        self.assertIsNone(config["installed_commit"])
+        self.assertRegex(installer.source_commit() or "", r"^[0-9a-f]{40}$")
+        self.assertEqual(config["plugins_path"], str(self.support / "plugins"))
         self.assertEqual(config["collector_path"], str(self.support / "runtime"))
         self.assertIn("  Claude: login found, enabled\n"
                       "  Codex: no login found, disabled\n"
@@ -691,7 +796,7 @@ class InstallationTransactionTests(unittest.TestCase):
     def test_explicit_flags_override_detection(self):
         detected = {"claude": True, "codex": False, "cursor": True, "devin": True}
         config, output = self.install_and_capture(self.detecting_run(detected), disable=["devin", "claude"])
-        self.assertEqual(config["disabled_providers"], ["claude", "devin"])
+        self.assertEqual(config["disabled_providers"], ["devin", "claude"])
         self.assertIn("  Codex: no login found, enabled\n", output)
         self.assertIn("  Devin: login found, disabled\n", output)
         config, _ = self.install_and_capture(self.detecting_run(detected), enable_all=True)
@@ -700,7 +805,7 @@ class InstallationTransactionTests(unittest.TestCase):
     def test_detection_closes_stdin_and_filters_the_environment(self):
         commands = []
         with patch.dict(os.environ, {"SYNTHETIC_UNRELATED_SECRET": "synthetic", "PYTHONINSPECT": "1"}):
-            self.install_and_capture(self.detecting_run({pid: True for pid in installer.PROVIDERS}, commands))
+            self.install_and_capture(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}, commands))
         _, kwargs = next(c for c in commands if "--detect" in c[0])
         self.assertEqual(kwargs.get("stdin"), subprocess.DEVNULL)
         self.assertNotIn("SYNTHETIC_UNRELATED_SECRET", kwargs["env"])
@@ -731,7 +836,7 @@ class InstallationTransactionTests(unittest.TestCase):
         (self.support / "logs").mkdir()
         (self.support / "logs/launchd.log").write_text("output from an earlier installation\n")
         (self.support / "logs/launchd.log").chmod(0o644)
-        self.install_and_capture(self.detecting_run({pid: True for pid in installer.PROVIDERS}))
+        self.install_and_capture(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
         # Each install empties launchd's log, so it cannot grow across reinstalls.
         self.assertEqual((self.support / "logs/launchd.log").stat().st_size, 0)
         for directory in (self.support, self.support / "logs", self.support / "bin"):
@@ -750,7 +855,7 @@ class InstallationTransactionTests(unittest.TestCase):
                     bundle = bundle.parent
                 marker = bundle / "Contents/MacOS/Bars"
                 calls.append((args, marker.read_text() if marker.exists() else None))
-            return self.detecting_run({pid: True for pid in installer.PROVIDERS})(args, **kwargs)
+            return self.detecting_run({pid: True for pid in installer.standard_plugin_ids()})(args, **kwargs)
         self.install_and_capture(fake_run)
         self.assertEqual((self.destination / "Contents/MacOS/Bars").read_text(), "new")
         self.assertEqual(len(calls), 2, calls)
@@ -769,7 +874,7 @@ class InstallationTransactionTests(unittest.TestCase):
         def fake_run(args, **kwargs):
             if args[0] == "/usr/bin/pluginkit" and args[1] == "-r" or args[0].endswith("lsregister") and args[1] == "-u":
                 raise OSError("synthetic missing tool")
-            return self.detecting_run({pid: True for pid in installer.PROVIDERS})(args, **kwargs)
+            return self.detecting_run({pid: True for pid in installer.standard_plugin_ids()})(args, **kwargs)
         self.install_and_capture(fake_run)
         self.assertEqual((self.destination / "Contents/MacOS/Bars").read_text(), "new")
         self.assertEqual(list(self.destination.parent.glob(".bars-install-*")), [])
@@ -790,7 +895,7 @@ class InstallationTransactionTests(unittest.TestCase):
         parent.chmod(0o555)
         self.addCleanup(parent.chmod, 0o755)
         with self.assertRaises(RuntimeError) as raised:
-            self.run_install(self.detecting_run({pid: True for pid in installer.PROVIDERS}, commands))
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}, commands))
         self.assertIn(str(parent), str(raised.exception))
         self.assert_old_installation()
         self.assertFalse((self.support / "logs").exists())
@@ -805,7 +910,7 @@ class InstallationTransactionTests(unittest.TestCase):
         owner = os.lstat(self.destination).st_uid
         with unittest.mock.patch.object(installer.os, "getuid", return_value=owner + 1):
             with self.assertRaises(RuntimeError) as raised:
-                self.run_install(self.detecting_run({pid: True for pid in installer.PROVIDERS}, commands))
+                self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}, commands))
         self.assertIn("another user account", str(raised.exception))
         self.assert_old_installation()
         self.assertFalse(any("--check-storage" in args or "--detect" in args or "launchctl" in args[0]
@@ -821,7 +926,7 @@ class InstallationTransactionTests(unittest.TestCase):
         os.chdir(working)
         self.addCleanup(os.chdir, previous)
         with patch.dict(os.environ, {"PATH": "relative-bin:/usr/bin:/bin"}):
-            config, _ = self.install_and_capture(self.detecting_run({pid: True for pid in installer.PROVIDERS}))
+            config, _ = self.install_and_capture(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
         entries = config["path"].split(":")
         self.assertTrue(all(os.path.isabs(entry) for entry in entries), entries)
         self.assertNotIn(os.path.realpath(working / "relative-bin"), [os.path.realpath(e) for e in entries])
@@ -831,7 +936,7 @@ class InstallationTransactionTests(unittest.TestCase):
         self.support.rename(real)
         self.support.symlink_to(real)
         with self.assertRaises(RuntimeError):
-            self.run_install(self.detecting_run({pid: True for pid in installer.PROVIDERS}))
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
         self.assertEqual((real / "installation.json").read_text(), "old config")
         self.assertEqual((self.destination / "Contents/MacOS/Bars").read_text(), "old")
 
@@ -863,9 +968,296 @@ class InstallationTransactionTests(unittest.TestCase):
             self.assertEqual(installer.main([]), 1)
             self.assertEqual(installer.main(["--uninstall"]), 1)
 
+    def test_standard_plugins_are_installed_and_updates_keep_local_edits(self):
+        plugins = self.support / "plugins"
+        shipped = (installer.STANDARD_PLUGINS / "claude/plugin.py").read_bytes()
+        # Something the person added before this install must survive untouched.
+        (plugins / "mine").mkdir(parents=True)
+        (plugins / "mine/plugin.json").write_text('{"manifest_version": 1, "id": "mine", "name": "Mine"}')
+        (plugins / "mine/plugin.py").write_text("def collect():\n    return {}\n")
+        (plugins / "claude").mkdir()
+        (plugins / "claude/notes.txt").write_text("my notes")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        self.assertEqual(sorted(p.name for p in plugins.iterdir()),
+                         [installer.PLUGIN_RECORD, "claude", "codex", "cursor", "devin", "mine"])
+        for pid in installer.standard_plugin_ids():
+            for name in ("plugin.json", "plugin.py"):
+                path = plugins / pid / name
+                self.assertEqual(path.read_bytes(), (installer.STANDARD_PLUGINS / pid / name).read_bytes())
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual((plugins / pid).stat().st_mode & 0o777, 0o700)
+        self.assertEqual((plugins / "claude/notes.txt").read_text(), "my notes")
+        self.assertEqual((plugins / "mine/plugin.py").read_text(), "def collect():\n    return {}\n")
+        record = json.loads((plugins / installer.PLUGIN_RECORD).read_text())
+        self.assertEqual(record["claude/plugin.py"], installer.file_digest(shipped))
+        self.assertNotIn("mine/plugin.py", record)
+        self.assertNotIn("Kept your modified", stderr.getvalue())
+
+        # A local edit survives the next install, with a warning; an unmodified file is refreshed.
+        (plugins / "claude/plugin.py").write_bytes(shipped + b"\n# my tweak\n")
+        (plugins / "codex/plugin.py").write_bytes(b"")  # Emptied, which still differs from the record.
+        (plugins / "cursor/plugin.py").unlink()  # Deleted: reinstalled.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        self.assertEqual((plugins / "claude/plugin.py").read_bytes(), shipped + b"\n# my tweak\n")
+        self.assertEqual((plugins / "codex/plugin.py").read_bytes(), b"")
+        self.assertEqual((plugins / "cursor/plugin.py").read_bytes(), (installer.STANDARD_PLUGINS / "cursor/plugin.py").read_bytes())
+        warnings = stderr.getvalue()
+        self.assertIn("Kept your modified plugin file claude/plugin.py", warnings)
+        self.assertIn("Kept your modified plugin file codex/plugin.py", warnings)
+        self.assertNotIn("cursor/plugin.py", warnings)
+        # The record still names the shipped digest for the kept file, so the edit stays
+        # recognised as an edit, and restoring the shipped bytes makes it replaceable again.
+        record = json.loads((plugins / installer.PLUGIN_RECORD).read_text())
+        self.assertEqual(record["claude/plugin.py"], installer.file_digest(shipped))
+        (plugins / "claude/plugin.py").write_bytes(shipped)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        self.assertNotIn("claude/plugin.py", stderr.getvalue())
+
+    def test_plugin_edits_made_while_the_installer_waits_are_kept(self):
+        # Planning happens under the refresh lock, right before writing, so an edit made
+        # while an earlier refresh held the lock is seen and kept.
+        plugins = self.support / "plugins"
+        shipped = (installer.STANDARD_PLUGINS / "claude/plugin.py").read_bytes()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        real_lock = installer.refresh_lock
+
+        @contextlib.contextmanager
+        def editing_lock(support, timeout=installer.REFRESH_LOCK_WAIT_SECONDS):
+            with real_lock(support, timeout):
+                (plugins / "claude/plugin.py").write_bytes(shipped + b"\n# edited during the wait\n")
+                yield
+        with patch.object(installer, "refresh_lock", editing_lock), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        self.assertEqual((plugins / "claude/plugin.py").read_bytes(), shipped + b"\n# edited during the wait\n")
+        self.assertIn("Kept your modified plugin file claude/plugin.py", stderr.getvalue())
+
+    def test_a_linked_plugin_directory_is_left_to_its_owner(self):
+        plugins = self.support / "plugins"
+        checkout = Path(self.temporary.name) / "my-claude-checkout"
+        checkout.mkdir()
+        (checkout / "plugin.py").write_text("# development copy\n")
+        plugins.mkdir()
+        (plugins / "claude").symlink_to(checkout)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        self.assertEqual((checkout / "plugin.py").read_text(), "# development copy\n")
+        self.assertFalse((checkout / "plugin.json").exists())
+        self.assertIn("claude (a link, managed by you)", stderr.getvalue())
+        self.assertTrue((plugins / "codex/plugin.py").exists())
+
+    def test_plugin_sync_takes_part_in_rollback(self):
+        plugins = self.support / "plugins"
+        (plugins / "claude").mkdir(parents=True)
+        (plugins / "claude/plugin.py").write_text("previous")
+        (plugins / installer.PLUGIN_RECORD).write_text(json.dumps(
+            {"claude/plugin.py": installer.file_digest(b"previous")}))
+        def fake_run(args, **kwargs):
+            if args[0].endswith("lsregister"):
+                raise subprocess.CalledProcessError(1, args)
+            return subprocess.CompletedProcess(args, 0)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_install(fake_run)
+        self.assert_old_installation()
+        self.assertEqual((plugins / "claude/plugin.py").read_text(), "previous")
+        self.assertFalse((plugins / "claude/plugin.json").exists())
+        # Directories the failed install created are removed again; an empty plugin
+        # directory would otherwise appear as a broken provider.
+        self.assertEqual(sorted(p.name for p in plugins.iterdir()), [installer.PLUGIN_RECORD, "claude"])
+        self.assertEqual(json.loads((plugins / installer.PLUGIN_RECORD).read_text()),
+                         {"claude/plugin.py": installer.file_digest(b"previous")})
+
+    def test_rollback_never_writes_through_a_plugin_directory_that_became_a_link(self):
+        plugins = self.support / "plugins"
+        elsewhere = Path(self.temporary.name) / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "plugin.py").write_text("# unrelated module\n")
+        (elsewhere / "plugin.json").write_text("{}")
+        real_private = installer.private_directory
+
+        def swap_after_creation(path):
+            # The directory is prepared, then replaced by a link before the writes.
+            real_private(path)
+            if path.name == "codex":
+                shutil.rmtree(path)
+                path.symlink_to(elsewhere)
+        with patch.object(installer, "private_directory", swap_after_creation), \
+                self.assertRaisesRegex(RuntimeError, "changed during installation"):
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        self.assert_old_installation()
+        # Neither the refused write nor the rollback touched the link's target.
+        self.assertEqual((elsewhere / "plugin.py").read_text(), "# unrelated module\n")
+        self.assertEqual((elsewhere / "plugin.json").read_text(), "{}")
+        # Files written before the refusal were rolled back; the link itself is left alone.
+        self.assertFalse((plugins / "claude").exists())
+        self.assertTrue((plugins / "codex").is_symlink())
+
+    def test_rollback_never_writes_through_a_linked_ancestor_directory(self):
+        # plugins/ itself replaced by a link after the files were written makes plugins/claude
+        # look like a real directory while living elsewhere; rollback must see through that.
+        elsewhere = Path(self.temporary.name) / "elsewhere"
+        (elsewhere / "claude").mkdir(parents=True)
+        (elsewhere / "claude/plugin.py").write_text("# sentinel\n")
+
+        def swap_then_fail(destination):
+            if (self.support / "plugins").is_symlink():
+                return  # rollback re-registers the restored app
+            shutil.rmtree(self.support / "plugins")
+            (self.support / "plugins").symlink_to(elsewhere)
+            raise subprocess.CalledProcessError(1, ["lsregister"])
+        with patch.object(installer, "register_app", side_effect=swap_then_fail), \
+                self.assertRaises(subprocess.CalledProcessError):
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        # Non-plugin files rolled back; the link's target untouched by the rollback.
+        self.assert_old_installation()
+        self.assertEqual((elsewhere / "claude/plugin.py").read_text(), "# sentinel\n")
+        self.assertEqual(sorted(p.name for p in elsewhere.iterdir()), ["claude"])
+        self.assertFalse((elsewhere / "claude/plugin.json").exists())
+        self.assertTrue((self.support / "plugins").is_symlink())
+
+    def test_writes_refuse_any_destination_directory_that_became_a_link(self):
+        # Not only plugin directories: the LaunchAgents directory swapped for a link after
+        # the preflight must not redirect the plist write, and rollback must not follow it.
+        elsewhere = Path(self.temporary.name) / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / f"{installer.LABEL}.plist").write_text("someone else's agent")
+        real_private = installer.private_directory
+
+        def swap_agents(path):
+            real_private(path)
+            if path.name == "devin":  # the last plugin directory: everything else is prepared
+                shutil.rmtree(self.agents)
+                self.agents.symlink_to(elsewhere)
+        with patch.object(installer, "private_directory", swap_agents), \
+                self.assertRaisesRegex(RuntimeError, "changed during installation"):
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        self.assertEqual((elsewhere / f"{installer.LABEL}.plist").read_text(), "someone else's agent")
+        self.assertEqual((self.destination / "Contents/MacOS/Bars").read_text(), "old")
+        self.assertEqual((self.support / "installation.json").read_text(), "old config")
+
+    def test_process_start_failures_after_the_swap_are_warnings(self):
+        # Once the files are in place, a process that cannot be started (an OSError from
+        # pgrep, open or kickstart, not just a nonzero exit) must not fail the installation.
+        for failing in ("/usr/bin/pgrep", "/usr/bin/open", "kickstart"):
+            with self.subTest(failing=failing):
+                self.setUp()
+                detecting = self.detecting_run({pid: True for pid in installer.standard_plugin_ids()})
+
+                def fake_run(args, **kwargs):
+                    swapped = (self.destination / "Contents/MacOS/Bars").read_text() == "new"
+                    if failing in args[:2] and swapped:
+                        raise OSError(35, "Resource temporarily unavailable")
+                    return detecting(args, **kwargs)
+                with contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(io.StringIO()) as stderr:
+                    self.run_install(fake_run)
+                self.assertIn("Installed", stdout.getvalue())
+                self.assertEqual((self.destination / "Contents/MacOS/Bars").read_text(), "new")
+                self.assertIn("could not be", stderr.getvalue() + stdout.getvalue())
+
+    def test_settings_changed_while_the_installer_waits_are_kept(self):
+        # The app edits disabled_providers in place; a change made while an earlier refresh
+        # held the lock must survive, and keys this installer does not know are carried over.
+        config_path = self.support / "installation.json"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        real_lock = installer.refresh_lock
+
+        @contextlib.contextmanager
+        def editing_lock(support, timeout=installer.REFRESH_LOCK_WAIT_SECONDS):
+            with real_lock(support, timeout):
+                config = json.loads(config_path.read_text())
+                config["disabled_providers"] = ["cursor"]
+                config["future_key"] = {"kept": True}
+                config_path.write_text(json.dumps(config))
+                yield
+        with patch.object(installer, "refresh_lock", editing_lock), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.run_install(self.detecting_run({pid: True for pid in installer.standard_plugin_ids()}))
+        config = json.loads(config_path.read_text())
+        self.assertEqual(config["disabled_providers"], ["cursor"])
+        self.assertEqual(config["future_key"], {"kept": True})
+        self.assertEqual(config["layout_version"], installer.LAYOUT_VERSION)
+
+    def test_failure_before_the_swap_creates_no_plugin_directories(self):
+        def fake_run(args, **kwargs):
+            if args[:2] == ["/bin/launchctl", "bootout"]:
+                raise subprocess.CalledProcessError(1, args)
+            return subprocess.CompletedProcess(args, 0)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_install(fake_run)
+        self.assert_old_installation()
+        # The layout's plugins directory is harmless when empty; a per-plugin directory
+        # without files would read as a broken provider.
+        self.assertEqual(list((self.support / "plugins").iterdir()), [])
+
+    def test_updating_a_version_one_installation_keeps_selection_and_retained_values(self):
+        # The layout the first release left behind: no plugins directory, no plugins_path,
+        # a quarter-hour LaunchAgent and a schema-1 snapshot with retained values.
+        (self.support / "installation.json").write_text(json.dumps({
+            "python": sys.executable, "collector_path": str(self.support / "runtime"),
+            "app_executable": str(self.destination / "Contents/MacOS/Bars"), "path": "/usr/bin:/bin",
+            "disabled_providers": ["cursor"]}))
+        old_metric = {"id": "monthly_credits", "label": "Monthly credits", "kind": "budget", "scope": "individual",
+                      "unit": "credits", "used": 36000, "limit": 150000, "remaining": 114000,
+                      "resets_at": "2026-11-01T00:00:00Z", "period": "month"}
+        v1 = {"schema_version": 1, "generated_at": "2026-10-15T12:00:00Z", "providers": [
+            {"id": pid, "name": pid.capitalize(), "enabled": pid != "cursor",
+             "status": "ok" if pid == "codex" else "setup",
+             "message": None if pid == "codex" else "Waiting for first collection.",
+             "fetched_at": "2026-10-15T12:00:00Z" if pid == "codex" else None,
+             "last_attempt_at": "2026-10-15T12:00:00Z" if pid == "codex" else None,
+             "primary_metric_id": "monthly_credits" if pid == "codex" else None,
+             "metrics": [old_metric] if pid == "codex" else []}
+            for pid in ("claude", "codex", "cursor", "devin")]}
+        (self.support / "snapshot.json").write_text(json.dumps(v1))
+        (self.agents / f"{installer.LABEL}.plist").write_bytes(plistlib.dumps({
+            "Label": installer.LABEL, "ProgramArguments": [str(self.support / "bin/refresh")],
+            "StartCalendarInterval": [{"Minute": m} for m in (0, 15, 30, 45)]}))
+        detected = {"claude": True, "codex": True, "cursor": True, "devin": False}
+        config, output = self.install_and_capture(self.detecting_run(detected))
+        # Selection survives (detection is not reapplied), plugins_path appears, plugins are synced.
+        self.assertEqual(config["disabled_providers"], ["cursor"])
+        self.assertEqual(config["plugins_path"], str(self.support / "plugins"))
+        self.assertEqual(sorted(p.name for p in (self.support / "plugins").iterdir()),
+                         [installer.PLUGIN_RECORD, "claude", "codex", "cursor", "devin"])
+        plist = plistlib.loads((self.agents / f"{installer.LABEL}.plist").read_bytes())
+        self.assertEqual(plist["StartCalendarInterval"], [{}])
+        self.assertEqual(plist["ProgramArguments"][1:], ["--scheduled"])
+        # The installer leaves the old snapshot to the new collector, which upgrades it in
+        # place: schema 2, every provider present, Codex's values and fetch time retained.
+        self.assertEqual(json.loads((self.support / "snapshot.json").read_text())["schema_version"], 1)
+        env = {key: os.environ[key] for key in installer.CHILD_ENVIRONMENT if key in os.environ}
+        env.update(PYTHONPATH=str(ROOT / "collector"), PYTHONDONTWRITEBYTECODE="1")
+        result = subprocess.run([sys.executable, "-m", "bars_collector", "--output", str(self.support / "snapshot.json"),
+                                 "--plugins", config["plugins_path"]]
+                                + [arg for pid in ("claude", "codex", "cursor", "devin") for arg in ("--disable", pid)],
+                                env=env, cwd=str(ROOT / "collector"), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        upgraded = json.loads((self.support / "snapshot.json").read_text())
+        self.assertEqual(upgraded["schema_version"], 2)
+        self.assertEqual([p["id"] for p in upgraded["providers"]], ["claude", "codex", "cursor", "devin"])
+        codex = next(p for p in upgraded["providers"] if p["id"] == "codex")
+        self.assertEqual((codex["status"], codex["fetched_at"], codex["metrics"][0]["used"]),
+                         ("ok", "2026-10-15T12:00:00Z", 36000))
+        self.assertEqual(codex["usage_url"], "https://chatgpt.com/codex/cloud/settings/analytics#usage")
+        self.assertEqual(codex["setup"]["login_command"], "codex login")
+        self.assertEqual(codex["secondary_metric_ids"], [])
+
+    def test_choose_disabled_keeps_order_and_accepts_any_plugin_id(self):
+        detected = {"alpha": False, "claude": True, "zeta": False}
+        self.assertEqual(installer.choose_disabled(detected, None, False), ["alpha", "zeta"])
+        self.assertEqual(installer.choose_disabled(detected, ["zeta", "mine", "zeta"], False), ["zeta", "mine"])
+        self.assertEqual(installer.choose_disabled(detected, None, False, previous=["mine", "cursor"]), ["mine", "cursor"])
+        self.assertEqual(installer.choose_disabled(None, None, False), [])
+        self.assertEqual(installer.choose_disabled(detected, ["zeta"], True), [])
+
     def test_command_line_rejects_conflicting_provider_flags(self):
         for argv in (["--disable", "cursor", "--enable-all"], ["--keep-data"],
-                     ["--uninstall", "--disable", "cursor"], ["--disable", "unknown"]):
+                     ["--uninstall", "--disable", "cursor"], ["--disable", "Not-Valid"]):
             with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as raised:
                     installer.main(argv)

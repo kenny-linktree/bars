@@ -9,8 +9,8 @@ import SwiftUI
 // The provider rows, bars, hidden-provider line and details inside them are the real shared
 // views, so changes to those need no mirroring.
 
-/// The overview branch of `BarsDropdown`. The real dropdown wraps this in a `ScrollView` of the
-/// fixed `DropdownLayout.size`; the harness fits the height to the content instead, and its
+/// The overview branch of `BarsDropdown`. The real dropdown wraps this in a `ScrollView` that
+/// fits its content up to `DropdownLayout.maxHeight`; the harness fits the height to the content, and its
 /// buttons do nothing. Accessibility hints and keyboard shortcuts draw nothing, so they are omitted.
 /// `now` mirrors the model's display date, advanced only while the real dropdown is open.
 struct OverviewMirror: View {
@@ -38,14 +38,18 @@ struct OverviewMirror: View {
                     .buttonStyle(.plain)
                 if provider.id != visible.last?.id { Divider() }
             }
-            if visible.isEmpty {
-                Text("Every provider is hidden. Show one below to see its usage.")
+            // `messages` stands for `model.storageError` only; the harness has no refresh or settings errors.
+            if visible.isEmpty, messages.isEmpty || !snapshot.providers.isEmpty {
+                Text(snapshot.providers.isEmpty
+                     ? "No provider plugins are installed. Reinstall Bars or add a plugin, then refresh."
+                     : "Every provider is hidden. Show one below to see its usage.")
                     .foregroundStyle(.secondary)
             }
+            Divider()
             VStack(alignment: .leading, spacing: 8) {
                 HiddenProvidersLine(snapshot: snapshot) { _ in }
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text("Updates about every 15 minutes while this Mac is awake. A provider shows its own time when it differs.")
+                    Text("Updates about every minute while this Mac is awake. A provider shows its own time when it differs.")
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                     Button("Quit Bars") {}

@@ -1,6 +1,15 @@
 import Foundation
 @testable import BarsViews
 
+/// The standard plugins' ids. The app itself names no provider; fixtures do so they can
+/// reproduce each standard plugin's metrics, setup text and usage link.
+extension ProviderID {
+    static let claude = ProviderID(rawValue: "claude")!
+    static let codex = ProviderID(rawValue: "codex")!
+    static let cursor = ProviderID(rawValue: "cursor")!
+    static let devin = ProviderID(rawValue: "devin")!
+}
+
 /// One data scenario rendered on every surface.
 struct PreviewVariant {
     let name: String
@@ -11,7 +20,7 @@ struct PreviewVariant {
 }
 
 enum Fixtures {
-    static let names = ["live", "stale", "mixed", "heavy", "previous", "empty", "setup", "hidden", "subscription"]
+    static let names = ["live", "stale", "mixed", "heavy", "previous", "empty", "setup", "hidden", "subscription", "many", "dense"]
     static let syntheticNames = names.filter { $0 != "live" }
     /// Synthetic variants share one fixed instant so their renders are deterministic.
     static let fixedNow = utc("2026-10-09T17:00:00Z")
@@ -40,6 +49,8 @@ enum Fixtures {
             case "setup": variant = .init(name: name, now: fixedNow, snapshot: setup(now: fixedNow))
             case "hidden": variant = .init(name: name, now: fixedNow, snapshot: hidden(now: fixedNow))
             case "subscription": variant = .init(name: name, now: fixedNow, snapshot: subscription(now: fixedNow))
+            case "many": variant = .init(name: name, now: fixedNow, snapshot: many(now: fixedNow))
+            case "dense": variant = .init(name: name, now: fixedNow, snapshot: dense(now: fixedNow))
             case "empty":
                 // First launch: BarsModel's initial snapshot plus its missing-file storage message.
                 variant = .init(name: name, now: fixedNow,
@@ -61,6 +72,7 @@ enum Fixtures {
                                     (ProviderID.codex, "primary_window", "secondary_window")] {
             snapshot.update(id) {
                 $0.primaryMetricId = short
+                $0.secondaryMetricIds = [weekly]
                 $0.metrics = [
                     .init(id: short, label: id == .claude ? "5-hour quota" : "Session quota",
                           kind: .quota, scope: .individual, unit: "%", used: 35, limit: 100, remaining: 65,
@@ -70,6 +82,44 @@ enum Fixtures {
                           resetsAt: now.addingTimeInterval(3 * 86_400), period: "week"),
                 ]
             }
+        }
+        return snapshot
+    }
+
+    /// Eight plugins: the four standard ones plus four custom ones with only manifest names and
+    /// one quota each. The widget shows four rows and counts the rest; the dropdown shows all.
+    static func many(now: Date) -> UsageSnapshot {
+        var snapshot = baseline(now: now)
+        let fetched = now.addingTimeInterval(-180)
+        for (id, name) in [("gemini", "Gemini"), ("kiro", "Kiro"), ("windsurf", "Windsurf"), ("zed", "Zed")] {
+            snapshot.providers.append(.init(
+                id: ProviderID(rawValue: id)!, name: name, status: .ok, message: nil, fetchedAt: fetched,
+                lastAttemptAt: fetched, primaryMetricId: "daily", metrics: [
+                    .init(id: "daily", label: "Daily quota", kind: .quota, scope: .individual, unit: "%",
+                          used: 40, limit: 100, remaining: 60, resetsAt: now.addingTimeInterval(8 * 3_600), period: "day"),
+                ]))
+        }
+        snapshot.providers.sort { $0.id < $1.id }
+        return snapshot
+    }
+
+    /// Every standard provider selecting the contract maximum of 31 secondary allowances: the
+    /// widget's shared mini-bar budget must keep the header and all four rows visible.
+    static func dense(now: Date) -> UsageSnapshot {
+        var snapshot = baseline(now: now)
+        for index in snapshot.providers.indices {
+            guard let primary = snapshot.providers[index].primaryMetricId else { continue }
+            var extra: [UsageMetric] = []
+            for number in 0..<31 {
+                let used = Double((number * 3) % 100)
+                let reset = now.addingTimeInterval(Double(number + 1) * 3_600)
+                extra.append(UsageMetric(id: "extra\(number)", label: "Extra allowance \(number)", kind: .quota,
+                                         scope: .individual, unit: "%", used: used, limit: 100, remaining: 100 - used,
+                                         resetsAt: reset, period: "day"))
+            }
+            let kept: [UsageMetric] = snapshot.providers[index].metrics.filter { $0.id == primary }
+            snapshot.providers[index].metrics = kept + extra
+            snapshot.providers[index].secondaryMetricIds = extra.map { $0.id }
         }
         return snapshot
     }
@@ -87,7 +137,14 @@ enum Fixtures {
 
     static func mixed(now: Date) -> UsageSnapshot {
         var snapshot = baseline(now: now)
-        snapshot.update(.claude) { $0.fetchedAt = now.addingTimeInterval(-120); $0.lastAttemptAt = $0.fetchedAt }
+        snapshot.update(.claude) {
+            // Rate limited two minutes ago; scheduled attempts pause until the provider's limit clears.
+            $0.status = .error
+            $0.message = "Provider rate limit reached. Collection will retry later."
+            $0.fetchedAt = now.addingTimeInterval(-6 * 60)
+            $0.lastAttemptAt = now.addingTimeInterval(-120)
+            $0.nextAttemptAt = now.addingTimeInterval(8 * 60)
+        }
         snapshot.update(.codex) {
             $0.status = .error
             $0.message = "Codex usage request failed with HTTP 503. Showing the last successful values."
@@ -100,6 +157,7 @@ enum Fixtures {
             $0.fetchedAt = nil
             $0.lastAttemptAt = now.addingTimeInterval(-60)
             $0.primaryMetricId = nil
+            $0.secondaryMetricIds = []
             $0.metrics = []
         }
         snapshot.update(.devin) { $0.fetchedAt = now.addingTimeInterval(-40 * 60); $0.lastAttemptAt = $0.fetchedAt }
@@ -162,6 +220,7 @@ enum Fixtures {
                 $0.fetchedAt = nil
                 $0.lastAttemptAt = now.addingTimeInterval(-180)
                 $0.primaryMetricId = nil
+                $0.secondaryMetricIds = []
                 $0.metrics = []
             }
         }
@@ -179,39 +238,79 @@ enum Fixtures {
         }
         snapshot.update(.devin) {
             $0 = ProviderSnapshot(id: .devin, name: "Devin", status: .setup, message: "Waiting for first collection.",
-                                  fetchedAt: nil, lastAttemptAt: nil, primaryMetricId: nil, metrics: [], enabled: false)
+                                  fetchedAt: nil, lastAttemptAt: nil, primaryMetricId: nil, metrics: [], enabled: false,
+                                  usageUrl: usageUrls[.devin], setup: guides[.devin])
         }
         return snapshot
     }
 
-    /// Same providers, metric identities, labels, scopes, units and periods as the collector emits.
-    /// Reset instants are derived from `now` the way each provider schedules them.
+    /// The standard plugins' manifests (plugins/<id>/plugin.json), which the collector copies into
+    /// every snapshot. Keep these in step with the manifests so setup previews match the app.
+    static let usageUrls: [ProviderID: URL] = [
+        .claude: URL(string: "https://claude.ai/settings/usage")!,
+        .codex: URL(string: "https://chatgpt.com/codex/cloud/settings/analytics#usage")!,
+        .cursor: URL(string: "https://cursor.com/dashboard?tab=usage")!,
+        .devin: URL(string: "https://app.devin.ai/settings/usage")!,
+    ]
+    static let guides: [ProviderID: ProviderSetupGuide] = [
+        .claude: .init(installTitle: "Install Claude Code",
+                       installUrl: URL(string: "https://code.claude.com/docs/en/overview")!,
+                       loginCommand: "claude",
+                       loginStep: "Run Claude Code once in Terminal and sign in:",
+                       signInAgain: "Run Claude Code in Terminal and sign in again. If it does not ask, type /login.",
+                       credentialNote: "Bars reads the “Claude Code-credentials” Keychain entry that Claude Code saves."),
+        .codex: .init(installTitle: "Install the Codex CLI",
+                      installUrl: URL(string: "https://developers.openai.com/codex/cli")!,
+                      loginCommand: "codex login",
+                      loginStep: "Sign in with your ChatGPT account:",
+                      signInAgain: "Run this in Terminal and sign in with your ChatGPT account:",
+                      credentialNote: "Bars reads the ChatGPT login that Codex stores in ~/.codex/auth.json."),
+        .cursor: .init(installTitle: "Install the Cursor CLI",
+                       installUrl: URL(string: "https://cursor.com/docs/cli/overview")!,
+                       loginCommand: "agent login",
+                       loginStep: "Sign in from Terminal:",
+                       signInAgain: "Run this in Terminal and sign in again:",
+                       credentialNote: "Bars reads the login that the Cursor CLI stores in the Keychain."),
+        .devin: .init(installTitle: "Install the Devin CLI",
+                      installUrl: URL(string: "https://docs.devin.ai/cli")!,
+                      loginCommand: "devin auth login",
+                      loginStep: "Sign in from Terminal:",
+                      signInAgain: "Run this in Terminal and sign in again:",
+                      credentialNote: "Bars reads ~/.local/share/devin/credentials.toml and asks the Devin CLI for your organization."),
+    ]
+
+    /// Same providers, metric identities, labels, scopes, units, periods, secondary allowances
+    /// and notes as the standard plugins emit. Reset instants are derived from `now` the way
+    /// each provider schedules them; Claude's monthly reset is the plugin's calendar estimate.
     static func baseline(now: Date) -> UsageSnapshot {
         let fetched = now.addingTimeInterval(-180)
         let monthStart = next(DateComponents(day: 1, hour: 0, minute: 0, second: 0), after: now)
         let cursorReset = next(DateComponents(day: 30, hour: 16, minute: 43, second: 25), after: now)
         let devinDaily = next(DateComponents(hour: 8, minute: 0, second: 0), after: now)
         let devinWeekly = next(DateComponents(hour: 8, minute: 0, second: 0, weekday: 1), after: now)
-        func provider(_ id: ProviderID, primary: String, _ metrics: [UsageMetric]) -> ProviderSnapshot {
-            .init(id: id, name: id.displayName, status: .ok, message: nil, fetchedAt: fetched,
-                  lastAttemptAt: fetched, primaryMetricId: primary, metrics: metrics)
+        func provider(_ id: ProviderID, _ name: String, primary: String, secondary: [String] = [],
+                      _ metrics: [UsageMetric]) -> ProviderSnapshot {
+            .init(id: id, name: name, status: .ok, message: nil, fetchedAt: fetched,
+                  lastAttemptAt: fetched, primaryMetricId: primary, secondaryMetricIds: secondary, metrics: metrics,
+                  usageUrl: usageUrls[id], setup: guides[id])
         }
         func metric(_ id: String, _ label: String, _ kind: MetricKind, _ scope: AllowanceScope, _ unit: String,
-                    used: Double?, limit: Double?, remaining: Double? = nil, resetsAt: Date?, period: AllowancePeriod?) -> UsageMetric {
+                    used: Double?, limit: Double?, remaining: Double? = nil, resetsAt: Date?, period: AllowancePeriod?,
+                    estimated: Bool = false, note: String? = nil) -> UsageMetric {
             .init(id: id, label: label, kind: kind, scope: scope, unit: unit, used: used, limit: limit,
                   remaining: remaining ?? used.flatMap { used in limit.map { max($0 - used, 0) } },
-                  resetsAt: resetsAt, period: period?.rawValue)
+                  resetsAt: resetsAt, period: period?.rawValue, resetsAtEstimated: estimated, note: note)
         }
         return .init(schemaVersion: UsageSnapshot.schemaVersion, generatedAt: fetched, providers: [
-            provider(.claude, primary: "monthly_spend", [
+            provider(.claude, "Claude", primary: "monthly_spend", [
                 metric("monthly_spend", "Monthly budget", .budget, .unknown, "USD",
-                       used: 400, limit: 2_000, resetsAt: nil, period: .month),
+                       used: 400, limit: 2_000, resetsAt: monthStart, period: .month, estimated: true),
             ]),
-            provider(.codex, primary: "monthly_credits", [
+            provider(.codex, "Codex", primary: "monthly_credits", [
                 metric("monthly_credits", "Monthly credits", .budget, .individual, "credits",
                        used: 36_000, limit: 150_000, resetsAt: monthStart, period: .month),
             ]),
-            provider(.cursor, primary: "included", [
+            provider(.cursor, "Cursor", primary: "included", secondary: ["individual_on_demand", "team_on_demand"], [
                 metric("included", "Included usage", .budget, .individual, "USD",
                        used: 32, limit: 100, resetsAt: cursorReset, period: .month),
                 metric("individual_on_demand", "Individual on-demand", .budget, .individual, "USD",
@@ -219,13 +318,14 @@ enum Fixtures {
                 metric("team_on_demand", "Team on-demand", .budget, .team, "USD",
                        used: 75, limit: 3_000, resetsAt: cursorReset, period: .month),
             ]),
-            provider(.devin, primary: "on_demand_balance", [
-                metric("on_demand_balance", "On-demand balance", .balance, .team, "USD",
-                       used: nil, limit: nil, remaining: 2_500, resetsAt: nil, period: nil),
+            provider(.devin, "Devin", primary: "weekly", secondary: ["daily", "on_demand"], [
                 metric("daily", "Daily quota", .quota, .unknown, "%",
                        used: 20, limit: 100, resetsAt: devinDaily, period: .day),
                 metric("weekly", "Weekly quota", .quota, .unknown, "%",
                        used: 45, limit: 100, resetsAt: devinWeekly, period: .week),
+                metric("on_demand", "On-demand credits", .budget, .team, "USD",
+                       used: 137.5, limit: 2_637.5, remaining: 2_500, resetsAt: monthStart, period: nil,
+                       note: "Used is your draw this cycle; left is what remains in the shared team pool. The bar compares the two, since Devin does not report the pool total."),
             ]),
         ])
     }

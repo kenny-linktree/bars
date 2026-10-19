@@ -33,7 +33,7 @@ Usage: bootstrap.sh [--disable ID]... [--enable-all] [--no-start] [--build-only]
 Clones or updates Bars in ~/Library/Application Support/Bars/src, builds it with
 Apple's Command Line Tools and installs it. Other options go to scripts/install.py.
 
-  --disable ID   Disable a provider (claude, codex, cursor, devin). Repeatable.
+  --disable ID   Disable a provider plugin (claude, codex, cursor, devin or your own). Repeatable.
   --enable-all   Enable every provider. By default, providers without a local
                  login are disabled.
   --no-start     Install without starting the scheduled collector now.
@@ -41,7 +41,7 @@ Apple's Command Line Tools and installs it. Other options go to scripts/install.
   --uninstall    Remove Bars, its scheduled collector and its data.
   --keep-data    With --uninstall, keep ~/Library/Application Support/Bars.
 
-Environment: BARS_REPO_URL (repository to clone), BARS_REF (branch, default main).
+Environment: BARS_REPO_URL (repository to clone), BARS_REF (branch or release tag, default main).
 EOF
 }
 
@@ -61,7 +61,7 @@ check_inputs() {
     '' | -*) fail "BARS_REPO_URL is not a repository URL." ;;
   esac
   case $REF in
-    '' | -* | *..* | *[!A-Za-z0-9._/-]*) fail "BARS_REF must be a branch name." ;;
+    '' | -* | *..* | *[!A-Za-z0-9._/-]*) fail "BARS_REF must be a branch or tag name." ;;
   esac
 }
 
@@ -84,10 +84,12 @@ check_install_arguments() {
       --disable)
         shift
         [ "$#" -gt 0 ] || fail "--disable needs a provider ID."
-        case $1 in
-          claude | codex | cursor | devin) has_disable=1 ;;
-          *) fail "Unknown provider ID: $1." ;;
-        esac ;;
+        # Any plugin id: lowercase letters, digits and underscores, starting with a letter.
+        # grep matches lines, so refuse an argument with a newline before asking it.
+        newline=$(printf '\nx'); newline=${newline%x}
+        case $1 in *"$newline"* | '') fail "Invalid provider ID." ;; esac
+        printf '%s\n' "$1" | LC_ALL=C grep -Eq '^[a-z][a-z0-9_]{0,31}$' || fail "Invalid provider ID: $1."
+        has_disable=1 ;;
       --enable-all) enable_all=1 ;;
       --no-start | --build-only) ;;
       *) fail "Unknown install option: $1." ;;
@@ -153,9 +155,19 @@ fetch_source() {
   if [ -d "$SRC/.git" ] && [ ! -L "$SRC" ] && [ ! -L "$SRC/.git" ]; then
     say "Updating the Bars source in $SRC ($REF)..."
     src_git remote set-url origin "$REPO_URL"
-    src_git fetch --quiet --prune origin
-    src_git checkout --quiet --force -B "$REF" "origin/$REF"
-    src_git reset --quiet --hard "origin/$REF"
+    # Prune tags too: a tag left by a previously configured repository must not stand in for
+    # one the selected repository does not have.
+    src_git fetch --quiet --prune --prune-tags --tags origin
+    # BARS_REF may name a branch or a tag (the documented downgrade uses the v1 tag).
+    if src_git rev-parse --quiet --verify "refs/remotes/origin/$REF^{commit}" >/dev/null; then
+      src_git checkout --quiet --force -B "$REF" "origin/$REF"
+      src_git reset --quiet --hard "origin/$REF"
+    elif src_git rev-parse --quiet --verify "refs/tags/$REF^{commit}" >/dev/null; then
+      src_git checkout --quiet --force --detach "refs/tags/$REF"
+      src_git reset --quiet --hard "refs/tags/$REF"
+    else
+      fail "$REF is not a branch or tag of $REPO_URL."
+    fi
   elif [ -e "$SRC" ] || [ -L "$SRC" ]; then
     fail "$SRC exists but is not a Git checkout. Move it aside, then run this again."
   else

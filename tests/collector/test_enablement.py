@@ -11,19 +11,26 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from bars_collector import __main__ as cli, adapters, parsers
+from bars_collector import __main__ as cli
 from bars_collector.model import CollectionError, validate_snapshot
-from bars_collector.runner import run
 from bars_collector.storage import load_snapshot
+from bars_plugin import access
+from plugin_fixtures import STANDARD_DIR, STANDARD_IDS, parse, plugin, run_standard as run
 
 COLLECTOR = Path(__file__).resolve().parents[2] / "collector"
 OLD = "2026-09-30T01:00:00Z"
 NEW = "2026-10-01T01:00:00Z"
 
 
+def detect_in_process():
+    """Each standard plugin's own `detect()`, in this process so lookups can be patched.
+    The CLI runs the same functions in worker processes; see the subprocess test below."""
+    return {pid: bool(plugin(pid).detect()) for pid in STANDARD_IDS}
+
+
 def ok(date):
     return dict(status="ok", message=None, fetched_at=date, last_attempt_at=date,
-                **parsers.devin({"overage_balance": 12.5}))
+                **parse("devin")({"overage_balance": 12.5}))
 
 
 class DisableTests(unittest.TestCase):
@@ -77,14 +84,14 @@ class DisableTests(unittest.TestCase):
         output = io.StringIO()
         with patch("bars_collector.runner.collect_results", side_effect=AssertionError("worker started")), \
                 contextlib.redirect_stdout(output):
-            code = cli.main(["--output", str(self.output), "--provider", "cursor", "--disable", "cursor"])
+            code = cli.main(["--output", str(self.output), "--plugins", str(STANDARD_DIR), "--provider", "cursor", "--disable", "cursor"])
         self.assertEqual(code, 0)
         self.assertIn("cursor: disabled", output.getvalue())
 
     def test_cli_passes_repeated_disable_to_runner(self):
         with patch.object(cli, "run", return_value=load_snapshot(self.output)) as fake, \
                 contextlib.redirect_stdout(io.StringIO()):
-            cli.main(["--output", str(self.output), "--disable", "codex", "--disable", "cursor"])
+            cli.main(["--output", str(self.output), "--plugins", str(STANDARD_DIR), "--disable", "codex", "--disable", "cursor"])
         self.assertEqual(fake.call_args.kwargs["disabled"], ["codex", "cursor"])
         self.assertEqual(fake.call_args.args[1], ["claude", "codex", "cursor", "devin"])
 
@@ -128,7 +135,7 @@ class DetectTests(unittest.TestCase):
             self.assertNotIn("-w", args)
             self.assertNotIn("-g", args)
             return subprocess.CompletedProcess(args, 0 if args[3] in present else 44)
-        return patch.object(adapters.subprocess, "run", side_effect=fake_run)
+        return patch.object(access.subprocess, "run", side_effect=fake_run)
 
     def write(self, relative, text):
         path = self.home / relative
@@ -137,7 +144,7 @@ class DetectTests(unittest.TestCase):
 
     def test_empty_home_detects_nothing_locally(self):
         with patch.dict(os.environ, self.environment()), self.fake_keychain(set()):
-            self.assertEqual(adapters.detect(), {"claude": False, "codex": False, "cursor": False, "devin": False})
+            self.assertEqual(detect_in_process(), {"claude": False, "codex": False, "cursor": False, "devin": False})
 
     def test_detects_every_provider_from_local_material(self):
         self.write(".codex/auth.json", json.dumps({"tokens": {"access_token": "a", "account_id": "b"}}))
@@ -147,7 +154,7 @@ class DetectTests(unittest.TestCase):
         cli_path.chmod(0o700)
         with patch.dict(os.environ, self.environment()), \
                 self.fake_keychain({"Claude Code-credentials", "cursor-access-token"}):
-            result = adapters.detect()
+            result = detect_in_process()
         self.assertEqual(list(result), ["claude", "codex", "cursor", "devin"])
         self.assertEqual(result, {"claude": True, "codex": True, "cursor": True, "devin": True})
 
@@ -156,27 +163,27 @@ class DetectTests(unittest.TestCase):
         self.write(".codex/auth.json", json.dumps({"OPENAI_API_KEY": "synthetic"}))
         self.write(".local/share/devin/credentials.toml", 'windsurf_api_key = "synthetic"\n')
         with patch.dict(os.environ, self.environment()), self.fake_keychain(set()):
-            self.assertEqual(adapters.detect(), {"claude": False, "codex": False, "cursor": False, "devin": False})
+            self.assertEqual(detect_in_process(), {"claude": False, "codex": False, "cursor": False, "devin": False})
         # Unreadable login material still means the provider is in use.
         self.write(".codex/auth.json", "{not json")
         self.write(".local/share/devin/credentials.toml", "windsurf_api_key = [\n")
         (self.bin / "devin").write_text("#!/bin/sh\n")
         (self.bin / "devin").chmod(0o700)
         with patch.dict(os.environ, self.environment()), self.fake_keychain(set()):
-            result = adapters.detect()
+            result = detect_in_process()
         self.assertEqual((result["codex"], result["devin"]), (True, True))
 
     def test_deeply_nested_codex_login_is_unreadable_not_a_crash(self):
         # json raises RecursionError, not ValueError, for very deep nesting. CPython 3.14
         # parses 100,000 levels, so use the deepest file within the 1 MiB read limit.
-        depth = adapters.MAX_BYTES // 2
+        depth = access.MAX_BYTES // 2
         self.write(".codex/auth.json", "[" * depth + "]" * depth)
         with patch.dict(os.environ, self.environment()):
             with self.assertRaises(CollectionError) as raised:
-                adapters.codex_credentials()
+                plugin("codex").credentials()
             self.assertEqual(raised.exception.status, "login_required")
             with self.fake_keychain(set()):
-                self.assertTrue(adapters.detect()["codex"])
+                self.assertTrue(detect_in_process()["codex"])
 
     def test_cli_prints_one_json_object_without_secrets_or_network(self):
         self.write(".codex/auth.json", json.dumps({"tokens": {"access_token": "synthetic-secret-token",
@@ -192,7 +199,7 @@ class DetectTests(unittest.TestCase):
             "sys.addaudithook(_hook)\n")
         env = self.environment()
         env["PYTHONPATH"] = f"{sitecustomize}:{COLLECTOR}"
-        result = subprocess.run([sys.executable, "-m", "bars_collector", "--detect"], env=env,
+        result = subprocess.run([sys.executable, "-m", "bars_collector", "--detect", "--plugins", str(STANDARD_DIR)], env=env,
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
@@ -205,7 +212,7 @@ class DetectTests(unittest.TestCase):
 
     def test_detect_rejects_collection_arguments(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            cli.main(["--detect", "--disable", "cursor"])
+            cli.main(["--detect", "--plugins", str(STANDARD_DIR), "--disable", "cursor"])
 
 
 if __name__ == "__main__":

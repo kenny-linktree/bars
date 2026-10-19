@@ -8,7 +8,7 @@ from pathlib import Path
 import stat
 import tempfile
 
-from .model import PROVIDERS, empty_provider, now, validate_snapshot
+from .model import MAX_SNAPSHOT_BYTES, SCHEMA_VERSION, encoded_size, now, upgrade_snapshot, validate_snapshot
 
 
 class AlreadyRunning(Exception):
@@ -42,13 +42,27 @@ def load_snapshot(output):
             content = file.read(1024 * 1024 + 1)
         if len(content) > 1024 * 1024:
             raise ValueError("Snapshot too large.")
-        return validate_snapshot(json.loads(content))
+        # A version 1 cache keeps its retained values; the runner then reconciles it with
+        # the discovered plugins before anything is written.
+        return validate_snapshot(upgrade_snapshot(json.loads(content)))
     except FileNotFoundError:
-        return dict(schema_version=1, generated_at=now(), providers=[empty_provider(p) for p in PROVIDERS])
+        return empty_snapshot()
+
+
+def empty_snapshot():
+    return dict(schema_version=SCHEMA_VERSION, generated_at=now(), providers=[])
+
+
+class SnapshotTooLarge(ValueError):
+    """The snapshot would exceed the bound every reader enforces; nothing was written."""
 
 
 def write_snapshot(output, snapshot):
     validate_snapshot(snapshot)
+    # The last line of defense: whatever produced it, a file over the bound is unreadable
+    # to every reader, so it is never the one that replaces a readable file.
+    if encoded_size(snapshot) > MAX_SNAPSHOT_BYTES:
+        raise SnapshotTooLarge("Snapshot too large.")
     output = Path(output)
     descriptor, temporary = tempfile.mkstemp(prefix="." + output.name + ".", dir=output.parent)
     try:

@@ -154,7 +154,7 @@ import SwiftUI
     }
 
     /// Match the collector's child environment (`CHILD_ENVIRONMENT` in
-    /// collector/bars_collector/adapters.py and integration/refresh.py). In particular, inherited
+    /// collector/bars_plugin/access.py and integration/refresh.py). In particular, inherited
     /// Python startup hooks and unrelated API keys must not reach the runner before its own
     /// filtering can execute.
     static func makeRefreshProcess(runner: URL, provider: ProviderID?,

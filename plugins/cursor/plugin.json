@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "id": "cursor",
+  "name": "Cursor",
+  "usage_url": "https://cursor.com/dashboard?tab=usage",
+  "setup": {
+    "install_title": "Install the Cursor CLI",
+    "install_url": "https://cursor.com/docs/cli/overview",
+    "login_command": "agent login",
+    "login_step": "Sign in from Terminal:",
+    "sign_in_again": "Run this in Terminal and sign in again:",
+    "credential_note": "Bars reads the login that the Cursor CLI stores in the Keychain."
+  }
+}

@@ -59,7 +59,6 @@ import SwiftUI
         popover.behavior = .applicationDefined
         popover.delegate = self
         popover.animates = true
-        popover.contentSize = DropdownLayout.size
         finishedLaunching = true
         if openWhenLaunched {
             openWhenLaunched = false
@@ -94,7 +93,10 @@ import SwiftUI
         guard let button = statusItem?.button else { return }
         model.startPolling()
         if popover.contentViewController == nil {
-            popover.contentViewController = NSHostingController(rootView: BarsDropdown(model: model))
+            let host = NSHostingController(rootView: BarsDropdown(model: model))
+            // The popover follows the hosted view's size as the content height changes.
+            host.sizingOptions = .preferredContentSize
+            popover.contentViewController = host
         }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         // A failed show never calls popoverDidClose, so stop polling and install no monitors.
@@ -152,6 +154,7 @@ import SwiftUI
 
 struct BarsDropdown: View {
     @ObservedObject var model: BarsModel
+    @State private var contentHeight: CGFloat = DropdownLayout.maxHeight
 
     var body: some View {
         let now = model.displayDate
@@ -193,14 +196,18 @@ struct BarsDropdown: View {
                         .accessibilityHint("Shows \(provider.name) details")
                         if provider.id != visible.last?.id { Divider() }
                     }
-                    if visible.isEmpty {
-                        Text("Every provider is hidden. Show one below to see its usage.")
+                    // Before the first readable snapshot the storage message above already explains.
+                    if visible.isEmpty, model.storageError == nil || !model.snapshot.providers.isEmpty {
+                        Text(model.snapshot.providers.isEmpty
+                             ? "No provider plugins are installed. Reinstall Bars or add a plugin, then refresh."
+                             : "Every provider is hidden. Show one below to see its usage.")
                             .foregroundStyle(.secondary)
                     }
+                    Divider()
                     VStack(alignment: .leading, spacing: 8) {
                         HiddenProvidersLine(snapshot: model.snapshot) { model.setHidden(false, provider: $0) }
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
-                            Text("Updates about every 15 minutes while this Mac is awake. A provider shows its own time when it differs.")
+                            Text("Updates about every minute while this Mac is awake. A provider shows its own time when it differs.")
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 0)
                             Button("Quit Bars") { NSApp.terminate(nil) }
@@ -213,8 +220,15 @@ struct BarsDropdown: View {
                 }
             }
             .padding(20)
+            .frame(width: DropdownLayout.width)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: ContentHeightKey.self, value: proxy.size.height)
+            })
         }
-        .frame(width: DropdownLayout.size.width, height: DropdownLayout.size.height)
+        .onPreferenceChange(ContentHeightKey.self) { contentHeight = $0 }
+        // Fit the popover to its content, within the layout's range, so a short overview or a
+        // details view does not leave empty space; content taller than the maximum scrolls.
+        .frame(width: DropdownLayout.width, height: DropdownLayout.height(fitting: contentHeight))
     }
 
     private func statusMessage(_ text: String) -> some View {

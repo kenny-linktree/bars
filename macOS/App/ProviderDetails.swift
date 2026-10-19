@@ -1,23 +1,24 @@
 import SwiftUI
 
 enum DropdownLayout {
-    /// The dropdown popover's fixed size. A fixed size keeps the popover from jumping as rows load
-    /// or change; taller content scrolls. Defined here rather than in BarsApp.swift so the preview
-    /// harness, which cannot compile that file, renders against the same value.
-    static let size = CGSize(width: 440, height: 700)
+    /// The dropdown popover's width, and the height range it fits its content within. Content
+    /// taller than `maxHeight` scrolls. Defined here rather than in BarsApp.swift so the preview
+    /// harness, which cannot compile that file, renders against the same values.
+    static let width: CGFloat = 440
+    static let minHeight: CGFloat = 120
+    static let maxHeight: CGFloat = 700
+    static let size = CGSize(width: width, height: maxHeight)
+
+    /// The popover height for content of the given height.
+    static func height(fitting contentHeight: CGFloat) -> CGFloat {
+        min(max(contentHeight, minHeight), maxHeight)
+    }
 }
 
-extension ProviderID {
-    var usageURL: URL {
-        let address: String
-        switch self {
-        case .claude: address = "https://claude.ai/settings/usage"
-        case .codex: address = "https://chatgpt.com/codex/cloud/settings/analytics#usage"
-        case .cursor: address = "https://cursor.com/dashboard?tab=usage"
-        case .devin: address = "https://app.devin.ai/settings/usage"
-        }
-        return URL(string: address)!
-    }
+/// Reports the content's laid-out height so the popover can fit it.
+struct ContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 struct ProviderDetails: View {
@@ -69,14 +70,17 @@ struct ProviderDetails: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Link(destination: provider.id.usageURL) {
-                HStack(spacing: 3) {
-                    Text("Open \(provider.name) usage")
-                    Image(systemName: "arrow.up.right")
+            // The usage page comes from the plugin manifest; a plugin without one has no link.
+            if let usageUrl = provider.usageUrl {
+                Link(destination: usageUrl) {
+                    HStack(spacing: 3) {
+                        Text("Open \(provider.name) usage")
+                        Image(systemName: "arrow.up.right")
+                    }
                 }
+                .font(.callout)
+                .accessibilityLabel("Open \(provider.name) usage, opens in your browser")
             }
-            .font(.callout)
-            .accessibilityLabel("Open \(provider.name) usage, opens in your browser")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -158,7 +162,7 @@ private struct MetricCard: View {
         }
     }
 
-    /// Devin's balance has no total or used amount, so it has no bar and no grid.
+    /// A balance has no total or used amount, so it has no bar and no grid.
     private var balance: some View {
         Group {
             HStack(alignment: .firstTextBaseline) {
@@ -216,6 +220,12 @@ private struct MetricCard: View {
         }
         if previous {
             Text("Previous period").font(.caption).foregroundStyle(.orange)
+        }
+        if let note = metric.note {
+            Text(note)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

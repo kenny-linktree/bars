@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "id": "devin",
+  "name": "Devin",
+  "usage_url": "https://app.devin.ai/settings/usage",
+  "setup": {
+    "install_title": "Install the Devin CLI",
+    "install_url": "https://docs.devin.ai/cli",
+    "login_command": "devin auth login",
+    "login_step": "Sign in from Terminal:",
+    "sign_in_again": "Run this in Terminal and sign in again:",
+    "credential_note": "Bars reads ~/.local/share/devin/credentials.toml and asks the Devin CLI for your organization."
+  }
+}

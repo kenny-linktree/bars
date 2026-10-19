@@ -1,9 +1,40 @@
 import Foundation
 
-enum ProviderID: String, Codable, CaseIterable, Identifiable {
-    case claude, codex, cursor, devin
+/// A provider plugin's id: lowercase ASCII letters, digits and underscores, at most 32 characters,
+/// starting with a letter. The set of providers is whatever plugins the collector found; nothing
+/// in the native readers names a particular provider.
+struct ProviderID: RawRepresentable, Hashable, Codable, Identifiable, Comparable {
+    let rawValue: String
     var id: String { rawValue }
-    var displayName: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+
+    /// Nil for anything the collector would not have produced, so a crafted snapshot or link
+    /// cannot smuggle arbitrary text into paths or settings.
+    init?(rawValue: String) {
+        guard Self.isValid(rawValue) else { return nil }
+        self.rawValue = rawValue
+    }
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        guard let value = ProviderID(rawValue: raw) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                   debugDescription: "Invalid provider id."))
+        }
+        self = value
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    static func < (lhs: ProviderID, rhs: ProviderID) -> Bool { lhs.rawValue < rhs.rawValue }
+
+    static func isValid(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        guard (1...32).contains(bytes.count), (97...122).contains(bytes[0]) else { return false }
+        return bytes.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 95 }
+    }
 
     /// The link a widget row opens: `bars://provider/<id>`, which shows that provider's details.
     var deepLink: URL { URL(string: "\(Self.deepLinkScheme)://\(Self.deepLinkHost)/\(rawValue)")! }
@@ -18,6 +49,22 @@ enum ProviderID: String, Codable, CaseIterable, Identifiable {
 
     private static let deepLinkScheme = "bars"
     private static let deepLinkHost = "provider"
+}
+
+/// Setup steps from a plugin's manifest: how the provider's existing login is created, shown when
+/// the collector finds no login material (setup) or cannot use it (login required).
+struct ProviderSetupGuide: Codable, Equatable {
+    /// The first step's link text, such as "Install the Codex CLI".
+    var installTitle: String
+    var installUrl: URL
+    /// The Terminal command that creates or renews the login Bars reads.
+    var loginCommand: String
+    /// The second step's text, above the command.
+    var loginStep: String
+    /// The sign-in-again text, above the command.
+    var signInAgain: String
+    /// Which login Bars reads, so a person can tell what the steps produce.
+    var credentialNote: String
 }
 
 extension Calendar {
@@ -84,6 +131,45 @@ struct UsageMetric: Codable, Identifiable, Equatable {
     /// Raw period token. Unknown tokens from a newer collector degrade to "no pace" instead of
     /// failing the whole snapshot; `allowancePeriod` is the typed view.
     var period: String?
+    /// True when the plugin derived `resetsAt` from documentation (such as the end of a documented
+    /// calendar month) rather than reading it from the source. Shown as "(est.)".
+    var resetsAtEstimated: Bool = false
+    /// An optional sentence from the plugin about a balance that has no total or used amount.
+    var note: String?
+
+    init(id: String, label: String, kind: MetricKind, scope: AllowanceScope, unit: String,
+         used: Double?, limit: Double?, remaining: Double? = nil, resetsAt: Date? = nil, period: String? = nil,
+         resetsAtEstimated: Bool = false, note: String? = nil) {
+        self.id = id
+        self.label = label
+        self.kind = kind
+        self.scope = scope
+        self.unit = unit
+        self.used = used
+        self.limit = limit
+        self.remaining = remaining
+        self.resetsAt = resetsAt
+        self.period = period
+        self.resetsAtEstimated = resetsAtEstimated
+        self.note = note
+    }
+
+    /// Decodes the newer optional fields as absent so version 2 snapshots from an older collector read.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        kind = try container.decode(MetricKind.self, forKey: .kind)
+        scope = try container.decode(AllowanceScope.self, forKey: .scope)
+        unit = try container.decode(String.self, forKey: .unit)
+        used = try container.decodeIfPresent(Double.self, forKey: .used)
+        limit = try container.decodeIfPresent(Double.self, forKey: .limit)
+        remaining = try container.decodeIfPresent(Double.self, forKey: .remaining)
+        resetsAt = try container.decodeIfPresent(Date.self, forKey: .resetsAt)
+        period = try container.decodeIfPresent(String.self, forKey: .period)
+        resetsAtEstimated = try container.decodeIfPresent(Bool.self, forKey: .resetsAtEstimated) ?? false
+        note = try container.decodeIfPresent(String.self, forKey: .note)
+    }
 
     var allowancePeriod: AllowancePeriod? { period.flatMap(AllowancePeriod.init(rawValue:)) }
 
@@ -105,18 +191,40 @@ struct ProviderSnapshot: Codable, Identifiable, Equatable {
     var message: String?
     var fetchedAt: Date?
     var lastAttemptAt: Date?
+    /// While set and in the future, the provider's scheduled attempts are paused after a rate
+    /// limit; an explicit refresh still tries. Missing in older snapshots.
+    var nextAttemptAt: Date?
     var primaryMetricId: String?
+    /// Metrics the overview shows as labeled mini bars beneath the primary bar, chosen by the
+    /// plugin. Never includes the primary.
+    var secondaryMetricIds: [String] = []
     var metrics: [UsageMetric]
     /// False for a hidden provider: the person disabled it, the collector skips it and the
     /// overview omits it. Its other fields keep their last values. Missing in older snapshots.
     var enabled: Bool = true
+    /// The provider's own usage page, from the plugin manifest. Details offer it as a link.
+    var usageUrl: URL?
+    /// Setup steps from the plugin manifest; nil when the plugin supplies none.
+    var setup: ProviderSetupGuide?
 
-    /// Two missed 15-minute collection runs. Data older than this is drawn dimmed, and the widget
-    /// header shows its age as relative text rather than as a clock time.
+    /// Collection runs every minute and retries transient failures within each run, so half an
+    /// hour without a success means something is wrong (sleep, network, a rejected login). Data
+    /// older than this is drawn dimmed, and the widget header shows its age as relative text
+    /// rather than as a clock time.
     static let staleInterval: TimeInterval = 30 * 60
 
     var primaryMetric: UsageMetric? { metrics.first { $0.id == primaryMetricId } }
+    var secondaryMetrics: [UsageMetric] { secondaryMetricIds.compactMap { id in metrics.first { $0.id == id } } }
     func isStale(at now: Date) -> Bool { Self.isStale(fetchedAt: fetchedAt, at: now) }
+    /// The longest pause the collector ever records; a longer one in a file is not a pause.
+    static let maximumPause: TimeInterval = 24 * 3600
+    /// True while scheduled attempts are paused after a rate limit, within the collector's bound.
+    func isPausing(at now: Date) -> Bool {
+        guard let until = nextAttemptAt, until > now, until.timeIntervalSince(now) <= Self.maximumPause,
+              let attempted = lastAttemptAt, attempted <= until, until.timeIntervalSince(attempted) <= Self.maximumPause
+        else { return false }
+        return true
+    }
 
     /// Data that never succeeded counts as stale.
     static func isStale(fetchedAt: Date?, at now: Date) -> Bool {
@@ -124,14 +232,33 @@ struct ProviderSnapshot: Codable, Identifiable, Equatable {
         return now.timeIntervalSince(fetchedAt) >= staleInterval
     }
 
-    static func unavailable(_ id: ProviderID, message: String) -> ProviderSnapshot {
-        .init(id: id, name: id.displayName, status: .setup, message: message,
-              fetchedAt: nil, lastAttemptAt: nil, primaryMetricId: nil, metrics: [])
+    /// A placeholder entry with no values, like the collector's before a first collection.
+    static func unavailable(_ id: ProviderID, name: String? = nil, message: String) -> ProviderSnapshot {
+        .init(id: id, name: name ?? id.rawValue.prefix(1).uppercased() + id.rawValue.dropFirst(),
+              status: .setup, message: message, fetchedAt: nil, lastAttemptAt: nil, primaryMetricId: nil, metrics: [])
+    }
+
+    init(id: ProviderID, name: String, status: FetchStatus, message: String?, fetchedAt: Date?,
+         lastAttemptAt: Date?, nextAttemptAt: Date? = nil, primaryMetricId: String?, secondaryMetricIds: [String] = [],
+         metrics: [UsageMetric], enabled: Bool = true, usageUrl: URL? = nil, setup: ProviderSetupGuide? = nil) {
+        self.id = id
+        self.name = name
+        self.status = status
+        self.message = message
+        self.fetchedAt = fetchedAt
+        self.lastAttemptAt = lastAttemptAt
+        self.nextAttemptAt = nextAttemptAt
+        self.primaryMetricId = primaryMetricId
+        self.secondaryMetricIds = secondaryMetricIds
+        self.metrics = metrics
+        self.enabled = enabled
+        self.usageUrl = usageUrl
+        self.setup = setup
     }
 }
 
 extension ProviderSnapshot {
-    /// Decodes `enabled` as optional so snapshots from collectors that predate hiding still read.
+    /// Decodes the optional fields as absent so snapshots from older collectors still read.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(ProviderID.self, forKey: .id)
@@ -140,42 +267,97 @@ extension ProviderSnapshot {
         message = try container.decodeIfPresent(String.self, forKey: .message)
         fetchedAt = try container.decodeIfPresent(Date.self, forKey: .fetchedAt)
         lastAttemptAt = try container.decodeIfPresent(Date.self, forKey: .lastAttemptAt)
+        nextAttemptAt = try container.decodeIfPresent(Date.self, forKey: .nextAttemptAt)
         primaryMetricId = try container.decodeIfPresent(String.self, forKey: .primaryMetricId)
+        secondaryMetricIds = try container.decodeIfPresent([String].self, forKey: .secondaryMetricIds) ?? []
         metrics = try container.decode([UsageMetric].self, forKey: .metrics)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        usageUrl = try container.decodeIfPresent(URL.self, forKey: .usageUrl)
+        setup = try container.decodeIfPresent(ProviderSetupGuide.self, forKey: .setup)
     }
 }
 
 struct UsageSnapshot: Codable, Equatable {
-    static let schemaVersion = 1
+    static let schemaVersion = 2
+    /// The number of standard plugins. Layouts tuned for four rows use it as their reference.
+    static let standardProviderCount = 4
     var schemaVersion: Int
     var generatedAt: Date
     var providers: [ProviderSnapshot]
 
+    /// A snapshot with no providers, for when no file could be read. `message` is the reason and
+    /// is kept so a reader can show it instead of claiming that no plugins are installed.
     static func unavailable(message: String) -> UsageSnapshot {
-        .init(schemaVersion: schemaVersion, generatedAt: .distantPast,
-              providers: ProviderID.allCases.map { .unavailable($0, message: message) })
+        var snapshot = UsageSnapshot(schemaVersion: schemaVersion, generatedAt: .distantPast, providers: [])
+        snapshot.unavailableMessage = message
+        return snapshot
     }
 
-    /// Providers the overview and widget show, in contract order.
+    /// Why the snapshot could not be read, when it could not. Never decoded from a file.
+    var unavailableMessage: String?
+
+    private enum CodingKeys: String, CodingKey { case schemaVersion, generatedAt, providers }
+
+    /// Providers the overview and widget show, in snapshot order.
     var visibleProviders: [ProviderSnapshot] { providers.filter(\.enabled) }
     /// Providers the person has hidden. Only a show control mentions them.
     var hiddenProviders: [ProviderSnapshot] { providers.filter { !$0.enabled } }
 
+    /// The contract's bounds, mirrored from the collector so the publisher refuses what the
+    /// collector would never write: at most this many metrics per provider, and short printable
+    /// text for every string a view shows.
+    static let maximumMetrics = 32
+    static let maximumTextLength = 200
+
+    /// Short, printable, non-empty: no control characters can reach a label or a log line.
+    static func isDisplayText(_ text: String, maximumLength: Int = maximumTextLength) -> Bool {
+        !text.isEmpty && text.count <= maximumLength
+            && !text.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) }
+    }
+
+    /// A link the app may hand to the browser: absolute `https` with a host.
+    static func isBrowserLink(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "https" && !(url.host ?? "").isEmpty && url.user == nil && url.password == nil
+    }
+
+    /// A metric id as the collector writes it: `[a-z][a-z0-9_]{0,63}`.
+    static func isMetricID(_ id: String) -> Bool {
+        let bytes = Array(id.utf8)
+        guard (1...64).contains(bytes.count), (97...122).contains(bytes[0]) else { return false }
+        return bytes.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 95 }
+    }
+
     func validate() throws {
         guard schemaVersion == Self.schemaVersion else { throw SnapshotError.unsupportedVersion }
-        guard providers.map(\.id) == ProviderID.allCases else { throw SnapshotError.invalidProviders }
+        // Ids are unique and ascending, the order the collector writes plugins in.
+        let ids = providers.map(\.id)
+        guard Set(ids).count == ids.count, ids == ids.sorted() else { throw SnapshotError.invalidProviders }
         for provider in providers {
-            guard !provider.name.isEmpty,
-                  Set(provider.metrics.map(\.id)).count == provider.metrics.count,
-                  provider.primaryMetricId == nil || provider.primaryMetric != nil
+            let metricIds = Set(provider.metrics.map(\.id))
+            guard Self.isDisplayText(provider.name, maximumLength: 32),
+                  provider.message.map({ Self.isDisplayText($0) }) ?? true,
+                  provider.usageUrl.map(Self.isBrowserLink) ?? true,
+                  provider.metrics.count <= Self.maximumMetrics,
+                  metricIds.count == provider.metrics.count,
+                  provider.primaryMetricId == nil || provider.primaryMetric != nil,
+                  Set(provider.secondaryMetricIds).count == provider.secondaryMetricIds.count,
+                  provider.secondaryMetricIds.allSatisfy({ metricIds.contains($0) && $0 != provider.primaryMetricId })
             else { throw SnapshotError.invalidMetrics }
+            if let setup = provider.setup {
+                guard Self.isBrowserLink(setup.installUrl),
+                      [setup.installTitle, setup.loginCommand, setup.loginStep, setup.signInAgain, setup.credentialNote]
+                          .allSatisfy({ Self.isDisplayText($0) })
+                else { throw SnapshotError.invalidMetrics }
+            }
             if provider.status == .ok && (provider.fetchedAt == nil || provider.metrics.isEmpty) {
                 throw SnapshotError.invalidMetrics
             }
             if !provider.metrics.isEmpty && provider.fetchedAt == nil { throw SnapshotError.invalidMetrics }
+            // A success ends any rate-limit pause; the two together would contradict each other.
+            if provider.status == .ok && provider.nextAttemptAt != nil { throw SnapshotError.invalidProviders }
             for metric in provider.metrics {
-                guard !metric.id.isEmpty, !metric.label.isEmpty, !metric.unit.isEmpty else {
+                guard Self.isMetricID(metric.id), Self.isDisplayText(metric.label), Self.isDisplayText(metric.unit),
+                      metric.note.map({ Self.isDisplayText($0) }) ?? true else {
                     throw SnapshotError.invalidMetrics
                 }
                 for number in [metric.used, metric.limit, metric.remaining].compactMap({ $0 }) {
@@ -200,10 +382,11 @@ struct UsageSnapshot: Codable, Equatable {
             return date
         }
         // Check the version before the shape, so a snapshot from a newer collector reports that
-        // it needs a newer Bars instead of failing as malformed data.
+        // it needs a newer Bars, and one from an older collector (the minutes after an update,
+        // before the new collector first publishes) says so, instead of failing as malformed data.
         struct Version: Decodable { var schemaVersion: Int }
         if let version = try? decoder.decode(Version.self, from: data), version.schemaVersion != Self.schemaVersion {
-            throw SnapshotError.unsupportedVersion
+            throw version.schemaVersion < Self.schemaVersion ? SnapshotError.outdatedVersion : SnapshotError.unsupportedVersion
         }
         let snapshot = try decoder.decode(Self.self, from: data)
         try snapshot.validate()
@@ -257,11 +440,12 @@ enum SnapshotDate {
 }
 
 enum SnapshotError: LocalizedError {
-    case unsupportedVersion, invalidProviders, invalidMetrics, sharedContainerUnavailable
+    case unsupportedVersion, outdatedVersion, invalidProviders, invalidMetrics, sharedContainerUnavailable
     var errorDescription: String? {
         switch self {
         case .unsupportedVersion: return "This snapshot needs a newer version of Bars."
-        case .invalidProviders: return "The snapshot does not contain all four providers in order."
+        case .outdatedVersion: return "Usage data from the previous version of Bars is being replaced. Refresh now if this stays."
+        case .invalidProviders: return "The snapshot's provider list is invalid."
         case .invalidMetrics: return "The snapshot contains invalid usage data."
         case .sharedContainerUnavailable: return "Bars cannot locate its published widget data. Check this Mac's user account and installation."
         }

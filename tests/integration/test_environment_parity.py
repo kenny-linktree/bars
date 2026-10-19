@@ -33,16 +33,16 @@ class ChildEnvironmentParityTests(unittest.TestCase):
     def test_all_allowlists_name_the_same_variables(self):
         sys.path.insert(0, str(ROOT / "collector"))
         try:
-            from bars_collector import adapters
+            from bars_plugin import access
         finally:
             sys.path.remove(str(ROOT / "collector"))
         lists = {
-            "collector/bars_collector/adapters.py": list(adapters.CHILD_ENVIRONMENT),
+            "collector/bars_plugin/access.py": list(access.CHILD_ENVIRONMENT),
             "integration/refresh.py": list(module("parity_refresh", ROOT / "integration/refresh.py").CHILD_ENVIRONMENT),
             "scripts/install.py": list(module("parity_installer", ROOT / "scripts/install.py").CHILD_ENVIRONMENT),
             "macOS/App/BarsModel.swift": swift_allowlist(),
         }
-        expected = set(lists["collector/bars_collector/adapters.py"])
+        expected = set(lists["collector/bars_plugin/access.py"])
         self.assertIn("HOME", expected)
         for path, names in lists.items():
             with self.subTest(path=path):

@@ -88,6 +88,8 @@ struct ProviderRow: View {
     var compact = false
     /// The consolidated freshness shown in the header. Without it every row shows its own age.
     var latestFetch: Date?
+    /// Mini bars this compact row may show; the widget allocates its budget across rows.
+    var compactSecondaryLimit = UsagePresentation.compactSecondaryLimit
 
     private var captionSize: CGFloat { compact ? 9 : 11 }
 
@@ -103,8 +105,14 @@ struct ProviderRow: View {
                         .padding(.vertical, compact ? 1 : 2)
                 }
                 paceAndContext(metric, pace: pace)
-                ForEach(UsagePresentation.secondaryAllowances(for: provider, now: now)) { allowance in
-                    SecondaryAllowanceRow(allowance: allowance, stale: provider.isStale(at: now), compact: compact)
+                let allowances = UsagePresentation.secondaryAllowances(for: provider, now: now)
+                let shown = compact ? UsagePresentation.compactSecondaryAllowances(allowances, limit: compactSecondaryLimit)
+                                    : (shown: allowances, omitted: 0)
+                // Allowances beyond the compact limit are counted on the last mini bar's caption
+                // rather than on a line of their own, so a dense plugin adds no height.
+                ForEach(shown.shown) { allowance in
+                    SecondaryAllowanceRow(allowance: allowance, stale: provider.isStale(at: now), compact: compact,
+                                          omitted: allowance.id == shown.shown.last?.id ? shown.omitted : 0)
                         .padding(.top, compact ? 0 : 2)
                 }
             } else if UsagePresentation.isNotSetUp(provider) {
@@ -181,11 +189,16 @@ struct ProviderRow: View {
     /// Status symbol and label when the latest attempt failed, then the data age.
     @ViewBuilder private var deviation: some View {
         let status = provider.status
-        if let fetchedAt = provider.fetchedAt {
-            let age = compact
+        let age: Text? = provider.fetchedAt.map { fetchedAt in
+            compact
                 // WidgetKit can delay timeline reloads. Relative text keeps aging itself.
                 ? Text("\(Text(fetchedAt, style: .relative)) ago")
                 : Text(UsagePresentation.age(since: fetchedAt, now: now))
+        }
+        if status != .ok, let pause = UsagePresentation.pauseText(for: provider, now: now) {
+            // A rate-limit pause is the plan, not a fault: say when, and the data's age if any.
+            Text("\(Image(systemName: "hourglass")) Rate limited · \(pause)\(age.map { Text(" · \($0)") } ?? Text(""))")
+        } else if let age {
             if status == .ok {
                 age
             } else {
@@ -222,34 +235,22 @@ struct ProviderRow: View {
         .minimumScaleFactor(0.8)
     }
 
-    @ViewBuilder private func paceAndContext(_ metric: UsageMetric, pace: UsagePace?) -> some View {
-        let paceLine = pace.flatMap { pace in
-            metric.allowancePeriod.map { period in
+    /// One status line under every bar, the same in the widget and the dropdown: pace on the
+    /// left when the allowance has a period, and the reset (or why there is none) on the right.
+    /// A fixed shape keeps rows the same height whether or not a provider reports pace.
+    private func paceAndContext(_ metric: UsageMetric, pace: UsagePace?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            if let pace, let period = metric.allowancePeriod {
                 Text(UsagePresentation.paceCaption(for: pace, period: period))
                     .foregroundStyle(BarsPalette.paceText(for: pace))
+                    .layoutPriority(2)
             }
+            Spacer(minLength: 0)
+            context(metric).layoutPriority(1)
         }
-        if compact, let paceLine {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                paceLine.layoutPriority(2)
-                Spacer(minLength: 0)
-                context(metric).layoutPriority(1)
-            }
-            .font(.system(size: captionSize))
-            .lineLimit(1)
-            .minimumScaleFactor(0.8)
-        } else {
-            if let paceLine {
-                paceLine
-                    .font(.system(size: captionSize))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-            context(metric)
-                .font(.system(size: captionSize))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
+        .font(.system(size: captionSize))
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
     }
 
     /// Reset text, or why there is none, followed by previous-period or overage warnings.
@@ -271,6 +272,8 @@ struct SecondaryAllowanceRow: View {
     let allowance: SecondaryAllowance
     var stale = false
     var compact = false
+    /// Further allowances the compact row leaves to details, counted beside this caption.
+    var omitted = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 2 : 3) {
@@ -279,6 +282,14 @@ struct SecondaryAllowanceRow: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .layoutPriority(1)
+                // The overflow count keeps its space; it is the descriptive caption that truncates.
+                if omitted > 0 {
+                    Text("· \(omitted) more in Bars")
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .layoutPriority(2)
+                }
                 Spacer(minLength: 0)
                 Text(allowance.value)
                     .monospacedDigit()
