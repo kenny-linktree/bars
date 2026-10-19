@@ -55,6 +55,43 @@ def number(value, *, negative=False):
     return result
 
 
+# The fixed-length periods, in seconds. A month is a calendar unit, so `period_for_length`
+# accepts any whole number of days from 28 to 31 for it.
+PERIOD_SECONDS = {"five_hours": 5 * 3_600, "day": 86_400, "week": 7 * 86_400}
+
+
+def period_for_length(seconds, fallback=None):
+    """The contract period for a window length a source reports, in seconds.
+
+    None means "not reported" and yields `fallback`, the plugin's documented default. A
+    reported length that matches no period (undocumented, malformed, a boolean) yields None:
+    no pace rather than a wrong one. This is the one way a plugin should turn a reported
+    length into a period, so every provider degrades the same way.
+    """
+    if seconds is None:
+        return fallback
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds != seconds:
+        return None
+    for name, length in PERIOD_SECONDS.items():
+        if seconds == length:
+            return name
+    return "month" if 28 * 86_400 <= seconds <= 31 * 86_400 and float(seconds).is_integer() else None
+
+
+def period_between(start, end, fallback=None):
+    """`period_for_length` for a window reported as two instants, in any form `timestamp()`
+    accepts. Either instant missing or unreadable yields `fallback`."""
+    try:
+        start, end = timestamp(start), timestamp(end)
+    except CollectionError:
+        return fallback
+    if start is None or end is None:
+        return fallback
+    begin = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    finish = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    return period_for_length((finish - begin).total_seconds())
+
+
 def timestamp(value):
     if value is None:
         return None

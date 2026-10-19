@@ -158,6 +158,29 @@ class ParserTests(unittest.TestCase):
             parse_codex({"spend_control": {"individual_limit": {"unit": "credit", "used": -1}},
                           "rate_limit": {"primary_window": {"used_percent": 20}}})
 
+    def test_periods_come_from_reported_lengths_through_one_helper(self):
+        # The SDK turns a reported window length into a period the same way for every plugin.
+        from bars_plugin import period_between, period_for_length
+        self.assertEqual([period_for_length(s) for s in (5 * 3_600, 86_400, 7 * 86_400, 30 * 86_400, 28 * 86_400, 31 * 86_400)],
+                         ["five_hours", "day", "week", "month", "month", "month"])
+        self.assertEqual(period_for_length(None, "week"), "week")
+        for bad in (3_600, 27 * 86_400, 32 * 86_400, 30 * 86_400 + 0.5, True, "18000", float("nan"), -86_400):
+            self.assertIsNone(period_for_length(bad, "week"), bad)
+        self.assertEqual(period_between("2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z"), "month")
+        self.assertEqual(period_between(1759276800, 1759881600), "week")  # epoch seconds, as some sources report
+        self.assertEqual(period_between(None, "2026-11-01T00:00:00Z", "month"), "month")
+        self.assertEqual(period_between("not a time", "2026-11-01T00:00:00Z", "month"), "month")
+        self.assertIsNone(period_between("2026-10-01T00:00:00Z", "2026-10-15T00:00:00Z", "month"))
+
+    def test_cursor_billing_cycle_bounds_confirm_the_monthly_period(self):
+        base = {"individualUsage": {"plan": {"used": 100, "limit": 10000}}}
+        monthly = parse_cursor({**base, "billingCycleStart": "2026-10-01T16:43:25Z", "billingCycleEnd": "2026-10-31T16:43:25Z"})
+        self.assertEqual(monthly["metrics"][0]["period"], "month")
+        # Bounds absent: the documented default. Bounds of another length: no period.
+        self.assertEqual(parse_cursor(base)["metrics"][0]["period"], "month")
+        trial = parse_cursor({**base, "billingCycleStart": "2026-10-01T00:00:00Z", "billingCycleEnd": "2026-10-15T00:00:00Z"})
+        self.assertIsNone(trial["metrics"][0]["period"])
+
     def test_cursor_equal_amounts_never_merge_scopes(self):
         allowance = {"enabled": True, "used": 250, "limit": 1000}
         value = parse_cursor({"billingCycleEnd": "2026-11-01T08:00:00+08:00",

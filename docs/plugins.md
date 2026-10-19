@@ -124,6 +124,7 @@ Readers derive pace from `used`, `limit`, `period`, `resets_at` and the fetch ti
 | `command(args, timeout=10)` | Runs a login tool from an argument list (no shell, no stdin, allowlisted environment, 1 MiB output bound, hard deadline) and returns its trimmed stdout. A non-zero exit is `login_required`; a missing tool is `setup`. |
 | `login_found(*lookups)` | For `detect()`: runs lookups and returns false only on a `setup` failure. |
 | `number`, `timestamp`, `now` | The normalizers `metric()` uses, for plugins that need them directly. |
+| `period_for_length(seconds, fallback=None)`, `period_between(start, end, fallback=None)` | The one way to turn a window length the source reports into a `period`: a documented length (5 hours, a day, a week, 28 to 31 days) maps to the contract's period, an absent one keeps `fallback` (the plugin's documented default), and an undocumented or malformed one yields `None`, so the readers show no pace rather than a wrong one. Codex uses the first with `limit_window_seconds`; Cursor the second with its billing-cycle bounds. |
 
 Only names exported by `bars_plugin` are supported. Other collector modules may change between versions.
 

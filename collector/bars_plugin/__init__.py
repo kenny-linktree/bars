@@ -20,13 +20,14 @@ are private and may change between versions.
 
 from .access import (CHILD_ENVIRONMENT, MAX_BYTES, child_environment, command, http_json, keychain,
                      keychain_entry_exists, login_found, rate_limit_pause_seconds, read_bytes, read_json, read_toml, token)
-from .values import (KINDS, PERIODS, SCOPES, CollectionError, metric, now, number, result, timestamp)
+from .values import (KINDS, PERIODS, SCOPES, CollectionError, metric, now, number, period_between, period_for_length,
+                     result, timestamp)
 
 SDK_VERSION = 1
 
 __all__ = [
     "SDK_VERSION", "CollectionError", "KINDS", "PERIODS", "SCOPES",
-    "metric", "result", "number", "timestamp", "now",
+    "metric", "result", "number", "timestamp", "now", "period_for_length", "period_between",
     "http_json", "keychain", "keychain_entry_exists", "command", "login_found", "rate_limit_pause_seconds",
     "read_bytes", "read_json", "read_toml", "token",
     "CHILD_ENVIRONMENT", "MAX_BYTES", "child_environment",
