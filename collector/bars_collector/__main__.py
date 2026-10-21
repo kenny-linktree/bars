@@ -35,6 +35,14 @@ def detect(plugins, timeout=DETECT_TIMEOUT):
     return found
 
 
+def diagnostic(line):
+    """Scheduling diagnostics go to standard error, one fixed-grammar line each (see schedule.py)."""
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Collect Bars usage once, without changing provider logins.")
     parser.add_argument("--output", type=Path, default=SUPPORT / "snapshot.json")
@@ -43,8 +51,12 @@ def main(argv=None):
     parser.add_argument("--provider", type=provider_id, metavar="ID")
     parser.add_argument("--disable", action="append", type=provider_id, default=[], metavar="ID",
                         help="Skip this provider and mark it disabled in the snapshot. Repeatable.")
-    parser.add_argument("--respect-pauses", action="store_true",
-                        help="Skip providers pausing after a rate limit (scheduled runs); an explicit refresh does not.")
+    parser.add_argument("--scheduled", action="store_true",
+                        help="A scheduled run: collect only providers due on their own interval, and count "
+                             "successes toward shortening an interval lengthened by rate limits.")
+    parser.add_argument("--requested-at", type=int, metavar="EPOCH",
+                        help="When an explicit refresh was requested, in Unix seconds: skip providers whose "
+                             "latest attempt finished since then.")
     parser.add_argument("--detect", action="store_true",
                         help="Print which providers have local login material as JSON, without network requests.")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
@@ -66,10 +78,13 @@ def main(argv=None):
     ids = [plugin.id for plugin in plugins]
     if arguments.provider and arguments.provider not in ids:
         parser.error("--provider names a provider with no plugin: " + arguments.provider)
+    if arguments.scheduled and arguments.requested_at is not None:
+        parser.error("--scheduled cannot be combined with --requested-at")
     selected = [arguments.provider] if arguments.provider else ids
     try:
         snapshot = run(arguments.output.expanduser(), selected, arguments.timeout,
-                       disabled=arguments.disable, plugins=plugins, respect_pauses=arguments.respect_pauses)
+                       disabled=arguments.disable, plugins=plugins, scheduled=arguments.scheduled,
+                       requested_at=arguments.requested_at, report=diagnostic)
     except CollectionCancelled:
         print("Bars collection was stopped.", file=sys.stderr)
         return 143

@@ -61,7 +61,7 @@ _Avoid_: Burn rate, velocity
 A provider's answer that it was asked too often (HTTP 429, or 503 with a stated pause). Unlike a transient failure it is not retried within the run; the provider's own figure, read from the standard headers, sets the floor of the pause.
 
 **Pause**:
-The interval after a rate limit during which scheduled collection leaves that provider alone, recorded as `next_attempt_at`: at least the provider's figure, otherwise five minutes, doubling with consecutive limits to an hour. Refresh now ignores it; a success or any other kind of failure ends it. The row shows `Rate limited · retries <time>` while it lasts.
+The interval after a rate limit during which collection leaves that provider alone, including Refresh now. It lasts at least as long as the provider requests and may grow after repeated limits. It is distinct from the provider's normal polling interval. The row shows `Rate limited · retries <time>` while it lasts.
 _Avoid_: Cooldown, backoff (that is the in-run retry wait)
 
 **Pace marker**:

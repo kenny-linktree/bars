@@ -319,28 +319,180 @@ class RunTests(unittest.TestCase):
         self.assertEqual({k: v for k, v in target.items() if k != "next_attempt_at"}, retained)
         self.assertIsNone(target["next_attempt_at"])
 
-    def test_a_pausing_provider_is_skipped_by_scheduled_runs_only(self):
+    def test_a_pausing_provider_is_skipped_by_scheduled_and_explicit_runs(self):
         limited = ("from bars_plugin import CollectionError\ndef collect():\n"
                    "    raise CollectionError('Provider rate limit reached. Collection will retry later.', retry_after=0)\n")
         write_plugin(self.plugins_dir, "limited", module=limited)
         write_plugin(self.plugins_dir, "fine", module=OK_PLUGIN)
-        snapshot = self.run_all(respect_pauses=True)
+        lines = []
+        snapshot = self.run_all(scheduled=True, report=lines.append)
         first = self.provider(snapshot, "limited")
         self.assertEqual(first["status"], "error")
         self.assertIsNotNone(first["next_attempt_at"])
         self.assertEqual(self.provider(snapshot, "fine")["status"], "ok")
-        # The next scheduled run leaves the limited provider alone: same attempt time.
-        snapshot = self.run_all(respect_pauses=True)
-        self.assertEqual(self.provider(snapshot, "limited")["last_attempt_at"], first["last_attempt_at"])
-        self.assertNotEqual(self.provider(snapshot, "fine")["last_attempt_at"], None)
-        # An explicit refresh tries anyway and, limited again, doubles the pause.
-        time.sleep(1.1)  # timestamps have one-second resolution
-        snapshot = self.run_all(respect_pauses=False)
-        second = self.provider(snapshot, "limited")
-        self.assertNotEqual(second["last_attempt_at"], first["last_attempt_at"])
         from bars_collector.model import parse_instant
-        self.assertEqual((parse_instant(second["next_attempt_at"]) - parse_instant(second["last_attempt_at"])).total_seconds(), 600)
+        # The pause is the later of the first five-minute pause and the doubled interval, plus
+        # at most a tenth of it as jitter.
+        pause = (parse_instant(first["next_attempt_at"]) - parse_instant(first["last_attempt_at"])).total_seconds()
+        self.assertTrue(300 <= pause <= 330, pause)
+        self.assertTrue(any(line.startswith("schedule: limited attempted outcome=rate_limited interval=120s "
+                                            "retry_after=0s next=") for line in lines), lines)
+        # The next scheduled run leaves the limited provider alone: same attempt time.
+        snapshot = self.run_all(scheduled=True)
+        self.assertEqual(self.provider(snapshot, "limited")["last_attempt_at"], first["last_attempt_at"])
+        # So does a refresh the person asks for, which still asks the provider that is not paused.
+        time.sleep(1.1)  # timestamps have one-second resolution
+        lines = []
+        snapshot = self.run_all(report=lines.append)
+        self.assertEqual(self.provider(snapshot, "limited"), first)
+        self.assertNotEqual(self.provider(snapshot, "fine")["last_attempt_at"], first["last_attempt_at"])
+        self.assertIn("schedule: limited skipped reason=rate_limited interval=120s next=" +
+                      first["next_attempt_at"], lines)
         load_snapshot(self.output)
+
+    def test_a_saved_rate_limit_still_blocks_refresh_after_the_snapshot_write_fails(self):
+        from bars_collector import schedule
+        from bars_collector.model import now
+
+        write_plugin(self.plugins_dir, "alpha", module=OK_PLUGIN)
+        before = copy.deepcopy(self.run_all())
+        started = int(time.time())
+        limited = dict(status="error", message="Rate limited.", last_attempt_at=now(), retry_after=900)
+        with patch("bars_collector.runner.write_snapshot", side_effect=OSError("Synthetic write failure")):
+            with self.assertRaises(OSError):
+                self.run_all(results=iter([("alpha", limited)]), clock=lambda: started, draw=lambda: 0.0)
+        self.assertEqual(load_snapshot(self.output), before)
+        plan, problem = schedule.load(schedule.schedule_path(self.output))
+        self.assertIsNone(problem)
+        due = plan.due("alpha")
+        self.assertGreaterEqual(due, started + 900)
+        for scheduled, at in ((False, started + 1), (True, due - 1)):
+            with self.subTest(scheduled=scheduled):
+                lines = []
+                with patch("bars_collector.runner.collect_results") as collect:
+                    result = self.run_all(scheduled=scheduled, clock=lambda: at, report=lines.append)
+                collect.assert_not_called()
+                self.assertEqual(result, before)
+                self.assertIn("schedule: alpha skipped reason=rate_limited interval=120s next=" +
+                              schedule.instant(due), lines)
+
+    def test_a_scheduled_run_asks_only_providers_that_are_due(self):
+        write_plugin(self.plugins_dir, "alpha", module=OK_PLUGIN)
+        write_plugin(self.plugins_dir, "beta", module=OK_PLUGIN)
+        clock = [1_800_000_000]
+        snapshot = copy.deepcopy(self.run_all(scheduled=True, clock=lambda: clock[0]))
+        self.assertEqual(self.provider(snapshot, "alpha")["status"], "ok")
+        # Thirty seconds later neither is due; nothing is attempted and nothing changes.
+        clock[0] += 30
+        lines = []
+        again = self.run_all(scheduled=True, clock=lambda: clock[0], report=lines.append)
+        self.assertEqual(again["providers"], snapshot["providers"])
+        self.assertEqual(lines, ["schedule: alpha skipped reason=not_due interval=60s next=2027-01-15T08:01:00Z",
+                                 "schedule: beta skipped reason=not_due interval=60s next=2027-01-15T08:01:00Z"])
+        # An explicit refresh is not held to the interval, and the scheduled run that follows
+        # in the same minute does not repeat it.
+        time.sleep(1.1)
+        explicit = copy.deepcopy(self.run_all(clock=lambda: clock[0]))
+        self.assertNotEqual(self.provider(explicit, "alpha")["last_attempt_at"],
+                            self.provider(snapshot, "alpha")["last_attempt_at"])
+        clock[0] += 15
+        self.assertEqual(self.run_all(scheduled=True, clock=lambda: clock[0])["providers"], explicit["providers"])
+        clock[0] -= 15
+        # A run starting a few seconds earlier in the next minute still finds them due.
+        clock[0] += 55
+        lines = []
+        self.run_all(scheduled=True, clock=lambda: clock[0], report=lines.append)
+        self.assertEqual([line.split(" ")[2] for line in lines], ["attempted", "attempted"])
+
+    def test_an_explicit_refresh_skips_providers_attempted_since_it_was_requested(self):
+        write_plugin(self.plugins_dir, "alpha", module=OK_PLUGIN)
+        write_plugin(self.plugins_dir, "beta", module=OK_PLUGIN)
+        import time as clock
+        requested = int(clock.time())
+        first = copy.deepcopy(self.run_all(disabled={"beta"}))
+        # A queued request runs after a run that already asked alpha; beta was hidden then.
+        lines = []
+        snapshot = self.run_all(requested_at=requested, report=lines.append)
+        self.assertEqual(self.provider(snapshot, "alpha"), self.provider(first, "alpha"))
+        self.assertEqual(self.provider(snapshot, "beta")["status"], "ok")
+        self.assertTrue(lines[0].startswith("schedule: alpha skipped reason=already_attempted interval=60s"), lines)
+        # A request time far in the past, or in the future, is ignored rather than trusted.
+        time.sleep(1.1)
+        for stale in (requested - 3600, requested + 3600):
+            snapshot = self.run_all(requested_at=stale)
+        self.assertNotEqual(self.provider(snapshot, "alpha")["last_attempt_at"], self.provider(first, "alpha")["last_attempt_at"])
+
+    def test_attempts_are_recorded_before_any_request_is_made(self):
+        # A run stopped midway (SIGTERM, the runner's time limit) still counts its attempts,
+        # so the next scheduled run does not ask the provider again at once.
+        from bars_collector import schedule
+        from bars_collector.runner import CollectionCancelled
+        write_plugin(self.plugins_dir, "alpha", module=OK_PLUGIN)
+        write_plugin(self.plugins_dir, "beta", module=OK_PLUGIN)
+
+        def stopped():
+            raise CollectionCancelled()
+            yield
+
+        with self.assertRaises(CollectionCancelled):
+            self.run_all(scheduled=True, results=stopped(), clock=lambda: 1_800_000_000)
+        stored = json.loads(schedule.schedule_path(self.output).read_text())["providers"]
+        self.assertEqual({pid: entry["due"] for pid, entry in stored.items()},
+                         {"alpha": 1_800_000_060, "beta": 1_800_000_060})
+        lines = []
+        self.run_all(scheduled=True, clock=lambda: 1_800_000_030, report=lines.append)
+        self.assertEqual([line.split(" ")[3] for line in lines], ["reason=not_due", "reason=not_due"])
+
+    def test_scheduling_state_follows_the_plugins_present(self):
+        import shutil
+        from bars_collector import schedule
+        write_plugin(self.plugins_dir, "alpha", module=OK_PLUGIN)
+        write_plugin(self.plugins_dir, "beta", module=OK_PLUGIN)
+        self.run_all(scheduled=True)
+        state = schedule.schedule_path(self.output)
+        self.assertEqual(sorted(json.loads(state.read_text())["providers"]), ["alpha", "beta"])
+        self.assertEqual(state.stat().st_mode & 0o777, 0o600)
+        # A removed plugin's schedule is forgotten, so adding it again starts at the baseline.
+        shutil.rmtree(self.plugins_dir / "beta")
+        self.run_all(scheduled=True)
+        self.assertEqual(sorted(json.loads(state.read_text())["providers"]), ["alpha"])
+        # A hidden provider keeps its schedule untouched.
+        before = json.loads(state.read_text())["providers"]["alpha"]
+        self.run_all(scheduled=True, disabled={"alpha"})
+        self.assertEqual(json.loads(state.read_text())["providers"]["alpha"], before)
+
+    def test_damaged_scheduling_state_never_stops_collection(self):
+        from bars_collector import schedule
+        write_plugin(self.plugins_dir, "alpha", module=OK_PLUGIN)
+        state = schedule.schedule_path(self.output)
+        self.run_all(scheduled=True)
+        target = self.root / "elsewhere"
+        target.write_text("unchanged")
+        for damage, problem in (("not json", "invalid"), ('{"version": 99}', "unsupported"),
+                                ("x" * (schedule.MAX_STATE_BYTES + 1), "unreadable"), ("link", "unreadable"),
+                                ('{"version": 1, "providers": {"alpha": {"interval": 7, "started": 0, "due": 0, '
+                                 '"successes": 0, "since": 0}}}', "invalid")):
+            with self.subTest(problem=problem, damage=damage[:20]):
+                state.unlink()
+                if damage == "link":
+                    state.symlink_to(target)
+                else:
+                    state.write_text(damage)
+                lines = []
+                snapshot = self.run_all(scheduled=True, report=lines.append)
+                self.assertEqual(lines[0], "schedule: state discarded reason=" + problem)
+                self.assertTrue(lines[1].startswith("schedule: alpha attempted outcome=ok interval=60s"), lines)
+                self.assertEqual(self.provider(snapshot, "alpha")["status"], "ok")
+                self.assertFalse(state.is_symlink())
+                self.assertEqual(set(json.loads(state.read_text())["providers"]), {"alpha"})
+        self.assertEqual(target.read_text(), "unchanged")
+        # A state file that cannot be written costs only the schedule, never the result.
+        state.unlink()
+        state.mkdir()
+        lines = []
+        snapshot = self.run_all(scheduled=True, report=lines.append)
+        self.assertIn("schedule: state not_saved", lines)
+        self.assertEqual(self.provider(snapshot, "alpha")["status"], "ok")
 
     def test_results_touch_only_their_provider_entry(self):
         write_plugin(self.plugins_dir, "alpha", module=OK_PLUGIN)

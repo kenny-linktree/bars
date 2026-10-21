@@ -67,6 +67,9 @@ MainActor.assumeIsolated {
         precondition((process.standardOutput as? FileHandle) === FileHandle.nullDevice)
         precondition((process.standardError as? FileHandle) === FileHandle.nullDevice)
         precondition(BarsModel.makeRefreshProcess(runner: runner, provider: nil, environment: [:]).arguments == ["--wait"])
+        precondition(BarsModel.makeRefreshProcess(runner: runner, provider: .cursor, requestedAt: 1_700_000_005,
+                                                  environment: [:]).arguments
+            == ["--wait", "--provider", "cursor", "--requested-at", "1700000005"])
         print("PASS: native refresh uses argument arrays, an allowlisted environment and null standard streams")
         // Real bounded reads of synthetic files exercise atomic replacements and recovery without
         // consulting the installed snapshot or settings. Equal file sizes are deliberately kept.
@@ -193,6 +196,56 @@ MainActor.assumeIsolated {
         clockModel.stopPolling()
         print("PASS: display time advances once a minute, pauses while hidden, and recovers on reopen or a backward clock change")
 
+        // Hide and show while a refresh runs: each queued provider refresh keeps the time the
+        // person asked, so the collector can tell a run that already answered it. A synthetic
+        // runner records its arguments; settings writes go to a recorder, never a real file.
+        let requestLog = directory.appendingPathComponent("requests.log")
+        let syntheticRunner = directory.appendingPathComponent("refresh")
+        try Data("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/requests.log\"\n".utf8)
+            .write(to: syntheticRunner, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: syntheticRunner.path)
+        var queueClock = Date(timeIntervalSince1970: 1_700_000_000)
+        var settingsWrites: [String] = []
+        let queueModel = BarsModel(readSnapshot: { supplied }, disabledProviders: { nil }, now: { queueClock },
+                                   refreshRunner: syntheticRunner,
+                                   saveHidden: { hidden, id in settingsWrites.append("\(id.rawValue) \(hidden)") })
+        queueModel.reload()
+        let ids = supplied.providers.map(\.id)
+        precondition(ids.count >= 2)
+        @MainActor func requests(count: Int) -> [String] {
+            let deadline = Date().addingTimeInterval(10)
+            var lines: [String] = []
+            var running = true
+            repeat {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+                lines = ((try? String(contentsOf: requestLog, encoding: .utf8)) ?? "")
+                    .split(separator: "\n").map(String.init)
+                running = queueModel.isRefreshing
+            } while (lines.count < count || running) && Date() < deadline
+            return lines
+        }
+        queueModel.refresh()
+        precondition(queueModel.isRefreshing)
+        queueClock = Date(timeIntervalSince1970: 1_700_000_005)
+        queueModel.setHidden(true, provider: ids[0])
+        queueClock = Date(timeIntervalSince1970: 1_700_000_006)
+        queueModel.setHidden(true, provider: ids[1])
+        queueClock = Date(timeIntervalSince1970: 1_700_000_007.9)
+        queueModel.setHidden(false, provider: ids[0])
+        precondition(settingsWrites == ["\(ids[0].rawValue) true", "\(ids[1].rawValue) true", "\(ids[0].rawValue) false"])
+        // Started later than every request; the queued runs must still carry the request times.
+        queueClock = Date(timeIntervalSince1970: 1_700_000_012)
+        let queued = requests(count: 3)
+        // A repeated request keeps its place in the queue and carries the latest request time.
+        precondition(queued == ["--wait",
+                                "--wait --provider \(ids[0].rawValue) --requested-at 1700000007",
+                                "--wait --provider \(ids[1].rawValue) --requested-at 1700000006"], "\(queued)")
+        precondition(!queueModel.isRefreshing && queueModel.refreshError == nil)
+        queueClock = Date(timeIntervalSince1970: 1_700_000_030)
+        queueModel.setHidden(true, provider: ids[1])
+        precondition(requests(count: 4).last == "--wait --provider \(ids[1].rawValue) --requested-at 1700000030")
+        print("PASS: queued hide and show refreshes keep their order and the latest time the person asked")
+
         #if BARS_APP_LIFECYCLE
         var closedReads = 0
         let closingModel = BarsModel(readSnapshot: { closedReads += 1; return supplied }, disabledProviders: { nil })
@@ -208,9 +261,9 @@ MainActor.assumeIsolated {
         RunLoop.main.run(until: Date().addingTimeInterval(0.04))
         precondition(closedReads == readsAfterTermination)
         print("PASS: AppKit's did-close notification stops polling without resetting model state")
-        print("7 preview and native lifecycle checks passed")
+        print("8 preview and native lifecycle checks passed")
         #else
-        print("6 preview and native lifecycle checks passed")
+        print("7 preview and native lifecycle checks passed")
         #endif
     } catch {
         fatalError("Preview checks failed: \(error)")
