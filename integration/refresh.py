@@ -23,6 +23,11 @@ MAX_RUN_SECONDS = 120
 # Allow an explicit request to follow a bounded run and its publication/cleanup.
 MAX_LOCK_WAIT_SECONDS = 150
 MAX_CONFIG_BYTES = 65536
+# The collector ignores a request time older than this or further ahead than the tolerance
+# (bars_collector.runner.MAX_REQUEST_AGE and schedule.DUE_TOLERANCE). A supplied time
+# outside that window is treated as a request made now.
+MAX_REQUEST_AGE = 10 * 60
+REQUEST_TOLERANCE = 20
 # The collector's exit status when the installed plugins no longer fit one snapshot file
 # (bars_collector.__main__.SNAPSHOT_TOO_LARGE_STATUS); refresh.py runs it as a subprocess.
 SNAPSHOT_TOO_LARGE_STATUS = 78
@@ -45,6 +50,20 @@ _LOGGABLE_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
 # that form is logged; anything else is reduced to a fixed line.
 MAX_STATUS_BYTES = 4096
 _STATUS_ENTRY = re.compile(r"([a-z][a-z0-9_]{0,31}): (ok|error|login_required|setup|disabled)")
+# The collector's standard error carries scheduling diagnostics, one line per provider in a
+# fixed grammar (bars_collector/schedule.py): provider ids, fixed words, whole numbers and
+# canonical times. Only lines in exactly that form are logged, joined into one log line;
+# everything else on standard error (fixed failure messages, a traceback) is never logged.
+MAX_DIAGNOSTIC_BYTES = 16384
+_SCHEDULE_ENTRY = re.compile(
+    r"schedule: (?:[a-z][a-z0-9_]{0,31} "
+    r"(?:attempted outcome=(?:ok|error|timeout|invalid|login_required|setup|rate_limited)"
+    r"|skipped reason=(?:not_due|rate_limited|already_attempted))"
+    r" interval=\d{2,4}s(?: retry_after=\d{1,5}s)?(?: next=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)?"
+    r"(?: change=(?:slower|faster))?"
+    r"|state (?:not_saved|discarded reason=(?:unreadable|invalid|unsupported)))")
+# Enough for several days of history at one run a minute.
+LOG_MAX_BYTES = 1024 * 1024
 # Keep in step with the credential tools' environment in bars_plugin/access.py.
 CHILD_ENVIRONMENT = (
     "HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
@@ -239,6 +258,36 @@ def log_statuses(output, logger: logging.Logger) -> None:
     logger.info("Provider statuses: %s.", "; ".join(match.group(0) for match in matches))
 
 
+def log_schedule(errors, logger: logging.Logger) -> None:
+    """Log the collector's scheduling diagnostics, only lines in exactly their grammar."""
+    errors.seek(0)
+    data = errors.read(MAX_DIAGNOSTIC_BYTES + 1)
+    truncated = len(data) > MAX_DIAGNOSTIC_BYTES
+    lines = data[:MAX_DIAGNOSTIC_BYTES].split(b"\n")
+    if truncated:
+        lines.pop()  # a line cut by the bound is not a whole diagnostic
+    entries = []
+    unrecognized = False
+    for line in lines:
+        if not line.startswith(b"schedule:"):
+            continue
+        try:
+            text = line.decode("ascii")
+        except UnicodeError:
+            text = None
+        if text is not None and _SCHEDULE_ENTRY.fullmatch(text):
+            entries.append(text[len("schedule: "):])
+        else:
+            unrecognized = True
+    if entries:
+        logger.info("Schedule: %s.", "; ".join(entries))
+    if unrecognized:
+        logger.warning("Collector schedule diagnostics were not recognized.")
+    if truncated:
+        logger.warning("Collector schedule diagnostics exceeded %d bytes; the rest were not logged.",
+                       MAX_DIAGNOSTIC_BYTES)
+
+
 def disabled_providers(config: dict, logger: logging.Logger) -> list[str]:
     """Provider IDs that are disabled, each once, in the file's order. Missing means none.
 
@@ -278,19 +327,23 @@ def acquire_refresh_lock(lock, *, wait: bool, logger: logging.Logger) -> bool:
 
 
 def collect_and_publish(config: dict, directory: Path, provider: str | None,
-                        logger: logging.Logger, *, explicit: bool = True) -> int:
+                        logger: logging.Logger, *, explicit: bool = True, requested_at: int | None = None) -> int:
     """Run the collector once and publish. `explicit` marks a refresh the person asked for,
-    which always requests a widget reload; scheduled runs reload on the throttled policy."""
+    which always requests a widget reload; scheduled runs reload on the throttled policy.
+    `requested_at` is when the person asked, before any wait for the lock."""
     snapshot = directory / "snapshot.json"
     executable = Path(config["app_executable"])
     args = [config["python"], "-m", "bars_collector", "--output", str(snapshot),
             "--plugins", str(config.get("plugins_path") or directory / "plugins")]
     if provider:
         args += ["--provider", provider]
-    # A scheduled run leaves a rate-limited provider alone until its pause ends; a refresh
-    # the person asked for tries anyway.
+    # Every run leaves a rate-limited provider alone until its pause ends. A scheduled run
+    # also asks each provider only when it is due on its own interval. A refresh the person
+    # asked for skips only providers a run that held the lock meanwhile has just attempted.
     if not explicit:
-        args.append("--respect-pauses")
+        args.append("--scheduled")
+    elif requested_at is not None:
+        args += ["--requested-at", str(int(requested_at))]
     # The collector skips disabled workers and records every provider's enabled state.
     for pid in disabled_providers(config, logger):
         args += ["--disable", pid]
@@ -310,9 +363,11 @@ def collect_and_publish(config: dict, directory: Path, provider: str | None,
         nonlocal cancelled
         cancelled = True
 
-    # Standard output holds only provider statuses; it goes to an unlinked private file
-    # so a stalled reader can never block the collector. Standard error is discarded.
+    # Standard output holds only provider statuses and standard error the scheduling
+    # diagnostics; both go to unlinked private files so a stalled reader can never block
+    # the collector, and only lines in their exact grammar reach the log.
     output = tempfile.TemporaryFile(dir=directory)
+    errors = tempfile.TemporaryFile(dir=directory)
     previous_handler = signal.signal(signal.SIGTERM, request_cancellation)
     process = None
     try:
@@ -321,7 +376,7 @@ def collect_and_publish(config: dict, directory: Path, provider: str | None,
         # `python -m` puts the working directory first on sys.path. launchd starts this
         # runner in the support directory, so run the collector from its own package root.
         process = subprocess.Popen(args, env=env, cwd=config["collector_path"], stdin=subprocess.DEVNULL,
-                                   stdout=output, stderr=subprocess.DEVNULL,
+                                   stdout=output, stderr=errors,
                                    start_new_session=True)
         while process.poll() is None:
             if cancelled:
@@ -359,6 +414,7 @@ def collect_and_publish(config: dict, directory: Path, provider: str | None,
                 write_reload_state(directory, digest, time.time())
         if cancelled:
             return 128 + signal.SIGTERM
+        log_schedule(errors, logger)
         log_statuses(output, logger)
         if process.returncode == SNAPSHOT_TOO_LARGE_STATUS:
             logger.error("Collector exited with status %s: the installed plugins exceed the snapshot size bound. "
@@ -376,6 +432,7 @@ def collect_and_publish(config: dict, directory: Path, provider: str | None,
                 stop_process(process)
         finally:
             output.close()
+            errors.close()
             signal.signal(signal.SIGTERM, previous_handler)
 
 
@@ -383,6 +440,20 @@ def provider_id(value: str) -> str:
     if not _PROVIDER_ID.fullmatch(value):
         raise argparse.ArgumentTypeError("provider ids are lowercase letters, digits and underscores")
     return value
+
+
+def epoch_seconds(value: str) -> int:
+    if not re.fullmatch(r"[0-9]{1,12}", value):
+        raise argparse.ArgumentTypeError("request times are whole UTC epoch seconds")
+    return int(value)
+
+
+def request_time(supplied: int | None, now: int) -> int:
+    """The time the person asked: the app's queued request time when the collector would
+    accept it, otherwise now."""
+    if supplied is not None and now - MAX_REQUEST_AGE <= supplied <= now + REQUEST_TOLERANCE:
+        return supplied
+    return now
 
 
 def main() -> int:
@@ -395,14 +466,22 @@ def main() -> int:
                              "refresh is running, and request widget reloads on the throttled schedule.")
     parser.add_argument("--jitter", type=float, default=5.0, metavar="SECONDS",
                         help="Longest random wait before a --scheduled run (default 5).")
+    parser.add_argument("--requested-at", type=epoch_seconds, metavar="EPOCH",
+                        help="When the person asked for this refresh, if earlier than now (default now).")
     parser.add_argument("--support-dir", type=Path,
                         default=Path.home() / "Library/Application Support/Bars")
     args = parser.parse_args()
     if args.scheduled and args.wait:
         parser.error("--scheduled and --wait cannot be combined")
+    if args.scheduled and args.requested_at is not None:
+        parser.error("--scheduled and --requested-at cannot be combined")
     if not 0 <= args.jitter <= 30:
         parser.error("--jitter must be between 0 and 30 seconds")
     directory = args.support_dir.expanduser()
+    # Taken before the jitter and any wait for the lock: a run that collects a provider
+    # meanwhile answers this request for it. The app passes the time of a request it queued
+    # behind an active refresh, which that refresh may already have answered.
+    requested_at = request_time(args.requested_at, int(time.time()))
     os.umask(0o077)
     if args.scheduled:
         jitter_delay(args.jitter)
@@ -414,7 +493,7 @@ def main() -> int:
         logs = private_directory(directory / "logs")
         logger = logging.getLogger("bars.refresh")
         logger.setLevel(logging.INFO)
-        handler = PrivateRotatingFileHandler(logs / "refresh.log", maxBytes=262144, backupCount=2)
+        handler = PrivateRotatingFileHandler(logs / "refresh.log", maxBytes=LOG_MAX_BYTES, backupCount=2)
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         logger.addHandler(handler)
         with os.fdopen(open_private(directory / "refresh.lock", os.O_RDWR | os.O_CREAT), "r+b") as lock:
@@ -422,7 +501,8 @@ def main() -> int:
                 return 1 if args.wait else 0
             # Read after acquiring the lock: the app can edit settings while we wait.
             config = read_config(directory / "installation.json")
-            return collect_and_publish(config, directory, args.provider, logger, explicit=not args.scheduled)
+            return collect_and_publish(config, directory, args.provider, logger, explicit=not args.scheduled,
+                                       requested_at=None if args.scheduled else requested_at)
     except Exception as error:
         # Exception bodies may contain local credential paths or subprocess output,
         # and launchd copies stderr into logs/launchd.log, so report only the type.

@@ -30,6 +30,12 @@ def module(name, path):
 
 
 refresh = module("bars_refresh", ROOT / "integration/refresh.py")
+
+
+def snapshot_time(value):
+    """Epoch seconds of a canonical whole-second snapshot timestamp."""
+    from datetime import datetime, timezone
+    return int(datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
 installer = module("bars_installer", ROOT / "scripts/install.py")
 
 
@@ -69,6 +75,7 @@ p = argparse.ArgumentParser()
 p.add_argument('--output')
 p.add_argument('--plugins')
 p.add_argument('--provider')
+p.add_argument('--requested-at', type=int)
 args = p.parse_args()
 path = pathlib.Path(args.output)
 for completed in (1, 2):
@@ -118,6 +125,7 @@ p = argparse.ArgumentParser()
 p.add_argument('--output')
 p.add_argument('--plugins')
 p.add_argument('--provider')
+p.add_argument('--requested-at', type=int)
 p.add_argument('--disable', action='append', default=[])
 args = p.parse_args()
 directory = pathlib.Path(args.output).parent
@@ -487,9 +495,10 @@ pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps(sys
         result = self.invoke("--provider", "codex")
         self.assertEqual(result.returncode, 0, result.stderr)
         arguments = self.collector_arguments()
+        requested_at = arguments[arguments.index("--requested-at") + 1]
         self.assertEqual(arguments[arguments.index("--plugins"):],
                          ["--plugins", str(self.directory / "plugins"), "--provider", "codex",
-                          "--disable", "devin", "--disable", "codex"])
+                          "--requested-at", requested_at, "--disable", "devin", "--disable", "codex"])
         # The app edits the file in place; the next run must see the change.
         self.config["disabled_providers"] = []
         (self.directory / "installation.json").write_text(json.dumps(self.config))
@@ -511,7 +520,7 @@ pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps(sys
                 self.assertEqual(self.invoke().returncode, 0)
                 expected = ["--disable", "cursor"] if value == ["cursor", "Not-Valid"] else []
                 arguments = self.collector_arguments()
-                self.assertEqual(arguments[arguments.index("--plugins") + 2:], expected)
+                self.assertEqual(arguments[arguments.index("--requested-at") + 2:], expected)
         log = (self.directory / "logs/refresh.log").read_text()
         self.assertIn("Ignoring invalid disabled_providers", log)
         self.assertIn("Ignoring invalid disabled provider ids: Not-Valid.", log)
@@ -656,15 +665,232 @@ sys.exit(refresh.main())
                                  str(self.directory), "--scheduled", "--jitter", "31"], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 2)
 
-    def test_only_scheduled_runs_ask_the_collector_to_respect_rate_limit_pauses(self):
+    def test_scheduled_and_explicit_runs_pass_their_scheduling_flags(self):
         self.script("""
 import json, pathlib, sys
 pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps({'argv': sys.argv[1:]}))
 """)
         self.assertEqual(self.invoke("--scheduled", "--jitter", "0").returncode, 0)
-        self.assertIn("--respect-pauses", json.loads((self.directory / "snapshot.json").read_text())["argv"])
-        self.assertEqual(self.invoke().returncode, 0)
-        self.assertNotIn("--respect-pauses", json.loads((self.directory / "snapshot.json").read_text())["argv"])
+        argv = json.loads((self.directory / "snapshot.json").read_text())["argv"]
+        self.assertIn("--scheduled", argv)
+        self.assertNotIn("--requested-at", argv)
+        self.assertNotIn("--respect-pauses", argv)
+        before = int(time.time())
+        self.assertEqual(self.invoke("--wait").returncode, 0)
+        argv = json.loads((self.directory / "snapshot.json").read_text())["argv"]
+        self.assertNotIn("--scheduled", argv)
+        # The request time is taken when the refresh was asked for, before any lock wait.
+        self.assertLessEqual(before, int(argv[argv.index("--requested-at") + 1]))
+        self.assertLessEqual(int(argv[argv.index("--requested-at") + 1]), int(time.time()))
+
+    def test_explicit_request_time_is_passed_to_the_collector(self):
+        self.script("""
+import json, pathlib, sys
+pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps({'argv': sys.argv[1:]}))
+""")
+
+        def requested(*args):
+            before = int(time.time())
+            result = self.invoke("--wait", "--provider", "cursor", *args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            argv = json.loads((self.directory / "snapshot.json").read_text())["argv"]
+            self.assertNotIn("--scheduled", argv)
+            self.assertEqual(argv.count("--requested-at"), 1)
+            return before, int(argv[argv.index("--requested-at") + 1]), int(time.time())
+
+        # A queued request from the app carries the time the person asked, even when earlier.
+        earlier = int(time.time()) - 7
+        self.assertEqual(requested("--requested-at", str(earlier))[1], earlier)
+        # A time the collector would ignore falls back to an ordinary request made now.
+        for value in (int(time.time()) - refresh.MAX_REQUEST_AGE - 60, int(time.time()) + refresh.REQUEST_TOLERANCE + 60, 0):
+            with self.subTest(value=value):
+                before, passed, after = requested("--requested-at", str(value))
+                self.assertLessEqual(before, passed)
+                self.assertLessEqual(passed, after)
+
+    def test_requested_at_rejects_scheduled_runs_and_malformed_times(self):
+        self.script("raise RuntimeError('Must not run')")
+        for args in (("--scheduled", "--jitter", "0", "--requested-at", str(int(time.time()))),
+                     ("--wait", "--requested-at", "-5"), ("--wait", "--requested-at", "+5"),
+                     ("--wait", "--requested-at", "1e9"), ("--wait", "--requested-at", " 5"),
+                     ("--wait", "--requested-at", ""), ("--wait", "--requested-at", "9" * 40)):
+            with self.subTest(args=args):
+                result = self.invoke(*args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse((self.directory / "published.jsonl").exists())
+
+    def test_queued_request_answered_by_the_active_run_republishes_without_asking_again(self):
+        # The app queues a provider refresh when the person hides and shows it during a run.
+        # The run that held the lock attempted the provider after the person asked, so the
+        # queued refresh republishes the settings without asking the provider again. An
+        # ordinary explicit refresh still asks.
+        plugins = self.directory / "synthetic-plugins"
+        for pid in ("alpha", "beta"):
+            (plugins / pid).mkdir(parents=True)
+            (plugins / pid / "plugin.json").write_text(json.dumps({"manifest_version": 1, "id": pid, "name": pid}))
+            (plugins / pid / "plugin.py").write_text(
+                "from bars_plugin import metric, result\n"
+                "def collect():\n"
+                "    return result('m', [metric('m', 'M', 'quota', 'individual', '%', 1, 100)])\n")
+        self.config["collector_path"] = str(ROOT / "collector")
+        self.config["plugins_path"] = str(plugins)
+        settings = self.directory / "installation.json"
+        settings.write_text(json.dumps(self.config))
+        asked = int(time.time())
+        result = self.invoke("--wait")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first = json.loads((self.directory / "snapshot.json").read_text())["providers"][0]
+        self.assertEqual((first["id"], first["status"]), ("alpha", "ok"))
+        self.assertGreaterEqual(snapshot_time(first["last_attempt_at"]), asked)
+        # Settings the app wrote while that run was active.
+        self.config["disabled_providers"] = ["beta"]
+        settings.write_text(json.dumps(self.config))
+        published = len((self.directory / "published.jsonl").read_text().splitlines())
+        time.sleep(1.1)  # timestamps have one-second resolution
+        (self.directory / "logs/refresh.log").unlink()
+        result = self.invoke("--wait", "--provider", "alpha", "--requested-at", str(asked))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = (self.directory / "logs/refresh.log").read_text()
+        self.assertRegex(log, r"Schedule: alpha skipped reason=already_attempted interval=60s next=\S+Z\.")
+        self.assertNotIn("attempted outcome", log)
+        after = json.loads((self.directory / "snapshot.json").read_text())["providers"][0]
+        self.assertEqual(after["last_attempt_at"], first["last_attempt_at"])
+        events = [json.loads(line) for line in (self.directory / "published.jsonl").read_text().splitlines()]
+        self.assertGreater(len(events), published)
+        self.assertTrue(events[-1]["reload"])
+        self.assertEqual([(p["id"], p["enabled"]) for p in events[-1]["data"]["providers"]],
+                         [("alpha", True), ("beta", False)])
+        # Without the original request time the same refresh asks the provider again.
+        (self.directory / "logs/refresh.log").unlink()
+        result = self.invoke("--wait", "--provider", "alpha")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = (self.directory / "logs/refresh.log").read_text()
+        self.assertRegex(log, r"Schedule: alpha attempted outcome=ok interval=60s next=\S+Z\.")
+        again = json.loads((self.directory / "snapshot.json").read_text())["providers"][0]
+        self.assertGreater(snapshot_time(again["last_attempt_at"]), snapshot_time(first["last_attempt_at"]))
+
+    def diagnostics_collector(self, stderr, status=0):
+        self.script(f"""
+import pathlib, sys
+sys.stdout.write('claude: ok; codex: error\\n')
+sys.stderr.buffer.write({stderr!r})
+pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text('{{}}')
+raise SystemExit({status})
+""")
+
+    def test_schedule_diagnostics_are_logged_in_one_line_before_statuses(self):
+        self.diagnostics_collector(
+            b"schedule: claude attempted outcome=ok interval=60s next=2026-10-21T17:01:00Z\n"
+            b"Traceback (most recent call last): synthetic-secret-0123\n"
+            b"schedule: codex attempted outcome=rate_limited interval=120s retry_after=30s "
+            b"next=2026-10-21T17:06:12Z change=slower\n"
+            b"schedule: cursor skipped reason=not_due interval=240s next=2026-10-21T17:03:00Z\n"
+            b"schedule: devin skipped reason=rate_limited interval=60s next=2026-10-21T17:04:00Z\n"
+            b"schedule: state discarded reason=invalid\n")
+        result = self.invoke("--scheduled", "--jitter", "0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = (self.directory / "logs/refresh.log").read_text().splitlines()
+        self.assertIn("INFO Schedule: claude attempted outcome=ok interval=60s next=2026-10-21T17:01:00Z; "
+                      "codex attempted outcome=rate_limited interval=120s retry_after=30s next=2026-10-21T17:06:12Z "
+                      "change=slower; cursor skipped reason=not_due interval=240s next=2026-10-21T17:03:00Z; "
+                      "devin skipped reason=rate_limited interval=60s next=2026-10-21T17:04:00Z; "
+                      "state discarded reason=invalid.", log[-3])
+        self.assertIn("INFO Provider statuses: claude: ok; codex: error.", log[-2])
+        self.assertIn("INFO Refresh completed", log[-1])
+        # Other standard error output (a traceback, the collector's fixed messages) is never logged.
+        self.assertNotIn("synthetic-secret", "\n".join(log))
+        self.assertNotIn("Traceback", "\n".join(log))
+        self.assertNotIn("not recognized", "\n".join(log))
+
+    def test_only_exact_schedule_diagnostics_reach_the_log(self):
+        cases = (
+            b"schedule: claude attempted outcome=ok interval=60s next=2026-10-21T17:01:00Z synthetic-secret-0123\n",
+            b"schedule: claude attempted outcome=Provider said synthetic-secret-0123 interval=60s\n",
+            b"schedule: Claude attempted outcome=ok interval=60s\n",
+            b"schedule: claude attempted outcome=ok interval=60s\r2026-01-01 ERROR forged\n",
+            "schedule: claude attempted outcome=ok interval=60s next=2026-10-21T17:01:00Z \u00e9\n".encode(),
+            b"schedule: claude skipped reason=forged interval=60s\n",
+        )
+        for stderr in cases:
+            with self.subTest(stderr=stderr[:70]):
+                (self.directory / "logs/refresh.log").unlink(missing_ok=True)
+                self.diagnostics_collector(stderr)
+                result = self.invoke()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                log = (self.directory / "logs/refresh.log").read_text()
+                self.assertIn("WARNING Collector schedule diagnostics were not recognized.", log)
+                self.assertNotIn("Schedule:", log)
+                for leaked in ("synthetic-secret", "forged", "Provider said", "\u00e9"):
+                    self.assertNotIn(leaked, log)
+
+    def test_schedule_diagnostics_are_bounded(self):
+        line = b"schedule: claude attempted outcome=ok interval=60s next=2026-10-21T17:01:00Z\n"
+        self.diagnostics_collector(line * (refresh.MAX_DIAGNOSTIC_BYTES // len(line) + 50))
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = (self.directory / "logs/refresh.log").read_text()
+        logged = [entry for entry in log.splitlines() if "INFO Schedule:" in entry]
+        self.assertEqual(len(logged), 1)
+        self.assertLessEqual(len(logged[0]), refresh.MAX_DIAGNOSTIC_BYTES + 200)
+        self.assertIn("exceeded %d bytes" % refresh.MAX_DIAGNOSTIC_BYTES, log)
+        self.assertNotIn("not recognized", log)
+
+    def test_real_collector_schedules_synthetic_plugins_end_to_end(self):
+        # The checkout's collector against synthetic plugins: a scheduled run attempts each
+        # once, the next scheduled run a minute later finds none due, a rate-limited
+        # provider stays paused even for an explicit refresh, and the log says why.
+        plugins = self.directory / "synthetic-plugins"
+        ok = ("from bars_plugin import metric, result\n"
+              "def collect():\n"
+              "    return result('m', [metric('m', 'M', 'quota', 'individual', '%', 1, 100)])\n")
+        limited = ("from bars_plugin import CollectionError\n"
+                   "def collect():\n"
+                   "    raise CollectionError('Provider rate limit reached. Collection will retry later.', retry_after=30)\n")
+        for pid, module in (("alpha", ok), ("beta", limited)):
+            (plugins / pid).mkdir(parents=True)
+            (plugins / pid / "plugin.json").write_text(json.dumps({"manifest_version": 1, "id": pid, "name": pid}))
+            (plugins / pid / "plugin.py").write_text(module)
+        self.config["collector_path"] = str(ROOT / "collector")
+        self.config["plugins_path"] = str(plugins)
+        (self.directory / "installation.json").write_text(json.dumps(self.config))
+        result = self.invoke("--scheduled", "--jitter", "0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = (self.directory / "logs/refresh.log").read_text()
+        # Workers report in completion order.
+        self.assertRegex(log, r"INFO Schedule: \S.*\.\n")
+        self.assertRegex(log, r"[:;] alpha attempted outcome=ok interval=60s next=\S+Z[;.]")
+        self.assertRegex(log, r"[:;] beta attempted outcome=rate_limited interval=120s retry_after=30s next=\S+Z "
+                              r"change=slower[;.]")
+        state = self.directory / "snapshot.json.schedule"
+        self.assertEqual(state.stat().st_mode & 0o777, 0o600)
+        stored = json.loads(state.read_text())
+        self.assertEqual(set(stored["providers"]), {"alpha", "beta"})
+        self.assertNotIn("Provider rate limit", state.read_text())
+        snapshot = json.loads((self.directory / "snapshot.json").read_text())
+        beta = next(p for p in snapshot["providers"] if p["id"] == "beta")
+        self.assertEqual(snapshot_time(beta["next_attempt_at"]), stored["providers"]["beta"]["due"])
+        # A scheduled run right after: nothing is due yet and nothing is attempted.
+        (self.directory / "logs/refresh.log").unlink()
+        result = self.invoke("--scheduled", "--jitter", "0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = (self.directory / "logs/refresh.log").read_text()
+        self.assertRegex(log, r"Schedule: alpha skipped reason=not_due interval=60s next=\S+Z; "
+                              r"beta skipped reason=rate_limited interval=120s next=\S+Z\.")
+        self.assertEqual(json.loads((self.directory / "snapshot.json").read_text())["providers"], snapshot["providers"])
+        # An explicit refresh asks alpha again but leaves the paused beta alone.
+        time.sleep(1.1)  # timestamps have one-second resolution
+        (self.directory / "logs/refresh.log").unlink()
+        result = self.invoke("--wait")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = (self.directory / "logs/refresh.log").read_text()
+        # Skips are reported before any attempt.
+        self.assertRegex(log, r"Schedule: beta skipped reason=rate_limited interval=120s next=\S+Z; "
+                              r"alpha attempted outcome=ok interval=60s next=\S+Z\.")
+        after = json.loads((self.directory / "snapshot.json").read_text())["providers"]
+        self.assertEqual(after[1], beta)
+        self.assertNotEqual(after[0]["last_attempt_at"], snapshot["providers"][0]["last_attempt_at"])
+        events = [json.loads(line) for line in (self.directory / "published.jsonl").read_text().splitlines()]
+        self.assertEqual(events[-1]["data"]["providers"], after)
 
     def test_scheduled_runs_throttle_widget_reloads_and_explicit_runs_do_not(self):
         self.script("""

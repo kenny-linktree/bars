@@ -11,22 +11,31 @@ import SwiftUI
     @Published var selectedProvider: ProviderID?
     /// Retained while the collector runs, so the process and its termination handler outlive `refresh`.
     private var refreshProcess: Process?
-    /// Provider refreshes requested by hide or show while another refresh was running. Each still
-    /// has to run so the collector republishes with the new settings.
-    private var queuedRefreshes: [ProviderID] = []
+    /// Provider refreshes requested by hide or show while another refresh was running, in request
+    /// order, each with the latest epoch second the person asked. Each still has to run so the
+    /// collector republishes with the new settings; the time lets it skip a provider that the
+    /// running refresh attempted after the request.
+    private var queuedRefreshes: [(provider: ProviderID, requestedAt: Int)] = []
     private let readSnapshot: () throws -> UsageSnapshot
     private let readDisabledProviders: () -> Set<ProviderID>?
     private let now: () -> Date
+    private let refreshRunner: URL
+    private let saveHidden: (Bool, ProviderID) throws -> Void
     private var pollingTimer: Timer?
 
     init(readSnapshot: @escaping () throws -> UsageSnapshot = {
         try SnapshotStore.read(from: SnapshotStore.sharedURL())
     }, disabledProviders: @escaping () -> Set<ProviderID>? = {
         ProviderSettings.disabledProviders()
-    }, now: @escaping () -> Date = Date.init) {
+    }, now: @escaping () -> Date = Date.init,
+         refreshRunner: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Bars/bin/refresh"),
+         saveHidden: @escaping (Bool, ProviderID) throws -> Void = ProviderSettings.setHidden) {
         self.readSnapshot = readSnapshot
         self.readDisabledProviders = disabledProviders
         self.now = now
+        self.refreshRunner = refreshRunner
+        self.saveHidden = saveHidden
         displayDate = now()
     }
 
@@ -101,7 +110,7 @@ import SwiftUI
     func setHidden(_ hidden: Bool, provider id: ProviderID) {
         guard let index = snapshot.providers.firstIndex(where: { $0.id == id }) else { return }
         do {
-            try ProviderSettings.setHidden(hidden, provider: id)
+            try saveHidden(hidden, id)
             settingsError = nil
         } catch {
             settingsError = ProviderSettings.failureMessage(error, hidden: hidden, name: snapshot.providers[index].name)
@@ -109,22 +118,23 @@ import SwiftUI
         }
         snapshot.providers[index].enabled = !hidden
         if hidden, selectedProvider == id { selectedProvider = nil }
-        if isRefreshing {
-            if !queuedRefreshes.contains(id) { queuedRefreshes.append(id) }
+        let requestedAt = Int(now().timeIntervalSince1970.rounded(.down))
+        if !isRefreshing {
+            refresh(provider: id, requestedAt: requestedAt)
+        } else if let queued = queuedRefreshes.firstIndex(where: { $0.provider == id }) {
+            queuedRefreshes[queued].requestedAt = requestedAt
         } else {
-            refresh(provider: id)
+            queuedRefreshes.append((id, requestedAt))
         }
     }
 
-    func refresh(provider: ProviderID? = nil) {
+    func refresh(provider: ProviderID? = nil, requestedAt: Int? = nil) {
         guard !isRefreshing else { return }
-        let runner = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Bars/bin/refresh")
-        guard FileManager.default.isExecutableFile(atPath: runner.path) else {
+        guard FileManager.default.isExecutableFile(atPath: refreshRunner.path) else {
             refreshError = "The background collector is not installed. Run the Bars installer, then refresh."
             return
         }
-        let process = Self.makeRefreshProcess(runner: runner, provider: provider)
+        let process = Self.makeRefreshProcess(runner: refreshRunner, provider: provider, requestedAt: requestedAt)
         // Foundation calls this on a background thread. Read the status there and hop to the main
         // actor for every model change.
         process.terminationHandler = { [weak self] process in
@@ -138,7 +148,10 @@ import SwiftUI
                 self.refreshError = status == 0 ? nil
                     : "Refresh could not complete. Check the collector status and try again."
                 self.reload()
-                if !self.queuedRefreshes.isEmpty { self.refresh(provider: self.queuedRefreshes.removeFirst()) }
+                if !self.queuedRefreshes.isEmpty {
+                    let next = self.queuedRefreshes.removeFirst()
+                    self.refresh(provider: next.provider, requestedAt: next.requestedAt)
+                }
             }
         }
         do {
@@ -157,7 +170,7 @@ import SwiftUI
     /// collector/bars_plugin/access.py and integration/refresh.py). In particular, inherited
     /// Python startup hooks and unrelated API keys must not reach the runner before its own
     /// filtering can execute.
-    static func makeRefreshProcess(runner: URL, provider: ProviderID?,
+    static func makeRefreshProcess(runner: URL, provider: ProviderID?, requestedAt: Int? = nil,
                                    environment: [String: String] = ProcessInfo.processInfo.environment) -> Process {
         let allowed: Set<String> = [
             "HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
@@ -167,6 +180,7 @@ import SwiftUI
         let process = Process()
         process.executableURL = runner
         process.arguments = ["--wait"] + (provider.map { ["--provider", $0.rawValue] } ?? [])
+            + (requestedAt.map { ["--requested-at", String($0)] } ?? [])
         process.environment = environment.filter { allowed.contains($0.key) }
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice

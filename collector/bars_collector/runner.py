@@ -20,6 +20,7 @@ import time
 from bars_plugin.access import child_environment
 from bars_plugin.values import MAX_TEXT
 
+from . import schedule
 from .model import (MAX_SNAPSHOT_BYTES, CollectionError, apply_enabled, encoded_size, is_pausing, now, parse_instant,
                     rate_limit_pause, reconcile, validate_result)
 from .storage import load_snapshot, write_snapshot, writer_lock
@@ -39,6 +40,10 @@ DEFAULT_TIMEOUT = 55
 # a missing or rejected login (`setup`, `login_required`) cannot fix itself in seconds.
 RETRY_FIRST_DELAY = 1.0
 RETRYABLE = frozenset({"error"})
+# An explicit refresh names the time the person asked (`requested_at`); a provider whose
+# latest attempt finished at or after it, in a run that held the lock meanwhile, already
+# answers the request and is not asked again. Older request times are ignored.
+MAX_REQUEST_AGE = 10 * 60
 
 
 class CollectionCancelled(BaseException):
@@ -253,12 +258,23 @@ def collect_results(selected, timeout=DEFAULT_TIMEOUT, collectors=None, retry=Tr
                 signal.signal(signal.SIGTERM, previous_signal)
 
 
-def apply_result(snapshot, pid, value):
-    previous = next(p for p in snapshot["providers"] if p["id"] == pid)
+def checked_result(value):
+    """The worker's value if it is a valid result, otherwise the fixed invalid-result failure."""
     try:
         validate_result(value)
     except (ValueError, CollectionError, KeyError, TypeError):
         value = dict(status="error", message=INVALID_MESSAGE, last_attempt_at=now())
+    return value
+
+
+def apply_result(snapshot, pid, value, pause_until=None):
+    """Apply one worker result to its own provider entry. Returns the value applied, which is
+    a fixed failure when the result was invalid or would not fit the snapshot.
+
+    A rate limit pauses the provider until `pause_until` when the caller's schedule gives
+    one, otherwise for `rate_limit_pause`."""
+    previous = next(p for p in snapshot["providers"] if p["id"] == pid)
+    value = checked_result(value)
     retained = dict(previous)
     if value["status"] == "ok":
         previous.update(value)
@@ -275,9 +291,10 @@ def apply_result(snapshot, pid, value):
         next_attempt = None
         if "retry_after" in value:
             # A rate limit pauses this provider's scheduled attempts; see rate_limit_pause.
-            attempted = parse_instant(value["last_attempt_at"])
-            pause = rate_limit_pause(retained, value["retry_after"], attempted)
-            next_attempt = (attempted + timedelta(seconds=pause)).isoformat(timespec="seconds").replace("+00:00", "Z")
+            if pause_until is None:
+                attempted = parse_instant(value["last_attempt_at"])
+                pause_until = attempted + timedelta(seconds=rate_limit_pause(retained, value["retry_after"], attempted))
+            next_attempt = pause_until.isoformat(timespec="seconds").replace("+00:00", "Z")
         previous["next_attempt_at"] = next_attempt
         # Nor may its message be the bytes that push the file past the bound. The pause
         # outcome still stands: an attempt that answered must not leave a stale pause behind.
@@ -288,23 +305,78 @@ def apply_result(snapshot, pid, value):
             if encoded_size(snapshot) > MAX_SNAPSHOT_BYTES:
                 previous["next_attempt_at"] = retained.get("next_attempt_at")
     snapshot["generated_at"] = now()
+    return value
+
+
+def outcome(value):
+    """A fixed category for an applied result, for the schedule and its diagnostics."""
+    if "retry_after" in value:
+        return "rate_limited"
+    if value["status"] == "error" and value["message"] == TIMEOUT_MESSAGE:
+        return "timeout"
+    if value["status"] == "error" and value["message"] in (INVALID_MESSAGE, OVERSIZE_MESSAGE):
+        return "invalid"
+    return value["status"]
+
+
+def settle(snapshot, plan, pid, value, started, scheduled, report):
+    """Apply a result and record it in the schedule. A rate limit's pause is the later of the
+    snapshot's escalating pause and the provider's doubled interval, plus a positive jitter."""
+    value = checked_result(value)
+    if "retry_after" in value:
+        entry = next(p for p in snapshot["providers"] if p["id"] == pid)
+        attempted = parse_instant(value["last_attempt_at"])
+        pause = rate_limit_pause(entry, value["retry_after"], attempted)
+        change = plan.record(pid, "rate_limited", started, scheduled=scheduled,
+                             attempted=int(attempted.timestamp()), pause=pause)
+        value = apply_result(snapshot, pid, value, datetime.fromtimestamp(plan.due(pid), timezone.utc))
+    else:
+        value = apply_result(snapshot, pid, value)
+        change = plan.record(pid, outcome(value), started, scheduled=scheduled)
+    report(schedule.attempt_line(pid, outcome(value), plan.interval(pid), plan.due(pid), value.get("retry_after"), change))
 
 
 def unloadable_result(plugin):
     return dict(status="error", message=plugin.error, last_attempt_at=now())
 
 
-def run(output, selected, timeout=DEFAULT_TIMEOUT, results=None, disabled=(), plugins=(), respect_pauses=False):
+def skip_reason(provider, plan, at, scheduled, requested_at):
+    """Why a run leaves an enabled provider alone, with the time it is next expected, or None.
+
+    Every run, explicit or scheduled, respects a rate-limit pause. A scheduled run also waits
+    for the provider's interval. An explicit run skips a provider whose latest attempt
+    finished after the person asked, which a run holding the lock meanwhile made.
+    """
+    moment = datetime.fromtimestamp(at, timezone.utc)
+    pause_until = plan.pause_until(provider["id"], at)
+    if is_pausing(provider, moment):
+        pause_until = max(pause_until or 0, int(parse_instant(provider["next_attempt_at"]).timestamp()))
+    if pause_until is not None:
+        return "rate_limited", pause_until
+    if scheduled and not plan.is_due(provider["id"], at):
+        return "not_due", plan.due(provider["id"])
+    attempted = parse_instant(provider.get("last_attempt_at"))
+    if requested_at is not None and attempted is not None and attempted.timestamp() >= requested_at:
+        return "already_attempted", plan.due(provider["id"])
+    return None
+
+
+def run(output, selected, timeout=DEFAULT_TIMEOUT, results=None, disabled=(), plugins=(), scheduled=False,
+        requested_at=None, report=None, clock=time.time, draw=random.random):
     """Collect `selected` providers from `plugins`, skipping any in `disabled`.
 
     Every run rebuilds the provider list from the discovered plugins and records each
     provider's enabled state. A disabled provider's worker never starts and its other
-    fields stay exactly as retained. Unknown ids in `selected` are ignored. With
-    `respect_pauses` (scheduled runs), a provider pausing after a rate limit is skipped too.
+    fields stay exactly as retained. Unknown ids in `selected` are ignored. A provider
+    pausing after a rate limit is skipped by every run; a `scheduled` run also skips a
+    provider that is not yet due on its own interval (see `schedule`), and an explicit run
+    with `requested_at` (epoch seconds) skips one attempted since that time. Skipped
+    providers keep every field. `report` receives one diagnostic line per provider.
     """
     disabled = frozenset(disabled)
     by_id = {plugin.id: plugin for plugin in plugins}
     selected = [pid for pid in selected if pid not in disabled and pid in by_id]
+    report = report or (lambda line: None)
     with writer_lock(output):
         # A first run publishes the provider list even when nothing collects, so the
         # readers can show which plugins exist (or that none do).
@@ -316,13 +388,44 @@ def run(output, selected, timeout=DEFAULT_TIMEOUT, results=None, disabled=(), pl
             # Too many plugins for one file is the one change that cannot be trimmed to fit;
             # the previous readable snapshot stays, and the command reports why.
             write_snapshot(output, snapshot)
-        if respect_pauses:
-            pausing = {p["id"] for p in snapshot["providers"] if is_pausing(p, datetime.now(timezone.utc))}
-            selected = [pid for pid in selected if pid not in pausing]
+        state = schedule.schedule_path(output)
+        plan, problem = schedule.load(state, draw=draw)
+        if problem:
+            report(schedule.state_line(problem))
+        pruned = plan.prune(by_id)
+        started = int(clock())
+        if requested_at is not None and not started - MAX_REQUEST_AGE <= requested_at <= started + schedule.DUE_TOLERANCE:
+            requested_at = None
+        entries = {p["id"]: p for p in snapshot["providers"]}
+        due = []
+        for pid in selected:
+            skipped = skip_reason(entries[pid], plan, started, scheduled, requested_at)
+            if skipped:
+                report(schedule.skip_line(pid, skipped[0], plan.interval(pid), skipped[1]))
+            else:
+                due.append(pid)
+        selected = due
+        saved = True
+
+        def save():
+            # Scheduling state is advisory: failing to save it must not lose a result, and
+            # a rate-limit pause is still recorded in the snapshot itself.
+            nonlocal saved
+            if not plan.save(state) and saved:
+                saved = False
+                report(schedule.state_line("not_saved"))
+
         if not selected:
+            if pruned or problem:
+                save()
             return snapshot
+        # Saved before any request, so a run that is stopped midway still counts its attempts.
+        for pid in selected:
+            plan.reserve(pid, started)
+        save()
         for pid in [pid for pid in selected if not by_id[pid].loadable]:
-            apply_result(snapshot, pid, unloadable_result(by_id[pid]))
+            settle(snapshot, plan, pid, unloadable_result(by_id[pid]), started, scheduled, report)
+            save()
             write_snapshot(output, snapshot)
         workers = [pid for pid in selected if by_id[pid].loadable]
         if results is None:
@@ -332,7 +435,10 @@ def run(output, selected, timeout=DEFAULT_TIMEOUT, results=None, disabled=(), pl
         try:
             for pid, value in results:
                 if pid in by_id:
-                    apply_result(snapshot, pid, value)
+                    settle(snapshot, plan, pid, value, started, scheduled, report)
+                    # The schedule goes first: a crash between the two writes then errs
+                    # toward asking the provider later, never sooner.
+                    save()
                     write_snapshot(output, snapshot)
         finally:
             close = getattr(results, "close", None)

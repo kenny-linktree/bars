@@ -15,9 +15,10 @@ PLACEHOLDER_MESSAGE = "Waiting for first collection."
 # What a plugin's `collect()` may contribute to its provider entry; everything else comes
 # from the manifest, the runner or the retained entry.
 RESULT_FIELDS = ("primary_metric_id", "secondary_metric_ids", "metrics")
-# A rate-limited provider's scheduled attempts pause: this long after the first limit, twice
-# as long after each consecutive one, never longer than the cap, and never shorter than the
-# provider's own Retry-After. An explicit refresh ignores the pause.
+# A rate-limited provider's attempts pause: this long after the first limit, twice as long
+# after each consecutive one, never longer than the cap, and never shorter than the
+# provider's own Retry-After. The runner lengthens the pause to the provider's doubled
+# collection interval when that is longer (see schedule.py); every run respects it.
 RATE_LIMIT_FIRST_PAUSE = 5 * 60
 RATE_LIMIT_MAX_PAUSE = 60 * 60
 # Keeps any one plugin from growing the snapshot past the readers' 1 MiB bound.

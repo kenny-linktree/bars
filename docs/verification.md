@@ -2,6 +2,26 @@
 
 These are dated observations from a development Mac running macOS 26. They do not establish behavior on every supported macOS release. Tests use synthetic data; historical checks of the installed app are summarized without account values or screenshots.
 
+## October 21, 2026: adaptive polling
+
+The collector suite ran 142 tests under Python 3.9.6 and Python 3.15.0, passing with
+one skip under 3.9.6. All 117 integration tests passed under both interpreters.
+The native preview harness passed eight checks, including a real synthetic-process
+hide/show queue check. All 40 Foundation-only core checks passed, and the Release
+app and widget built and passed strict signature verification without installation.
+Shell syntax and whitespace checks passed.
+
+Native commands used
+`SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk`.
+The preview check with the default 27.0 SDK failed on unchanged SwiftUI `@State`
+macro declarations because the Command Line Tools could not load their macro plugin;
+selecting the installed 26.5 SDK for these commands avoided that toolchain mismatch
+without changing the global developer-directory setting.
+
+These checks exercised synthetic providers and temporary state only. They did not
+verify installed LaunchAgent behavior, filesystem power-loss durability, or a
+sustainable request rate against any live provider.
+
 ## October 1, 2026
 
 The first installation used Python 3.14.7 and Command Line Tools with Swift 6.3.3, without full Xcode or a paid developer membership. The initial checks passed: 30 collector tests, 10 integration tests and 11 Swift checks. Later changes that day increased the collector suite to 31 and the Swift checks to 16; those checks passed as well.

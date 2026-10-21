@@ -3,6 +3,34 @@
 Releases are tags on `main`. The install command follows `main`; `BARS_REF=<tag>` installs a
 specific release, and `installation.json` records the installed commit.
 
+## v3 (2026-10-21)
+
+### Added
+- Independent adaptive polling for each provider. Collection starts every minute; rate limits
+  lengthen that provider's interval, and sustained successful scheduled fetches cautiously
+  shorten it again. Learned intervals persist across runs and app updates.
+- Safe scheduling diagnostics distinguish actual attempts from providers skipped because they
+  are not due, are rate limited, or were already fetched for a queued request.
+
+### Changed
+- Refresh now respects rate-limit pauses instead of bypassing them. Successful refreshes retain
+  the learned interval rather than immediately returning to one-minute polling.
+- Scheduled collector invocations use `--scheduled`; explicit invocations can supply
+  `--requested-at` to avoid repeating requests that completed while they waited.
+
+### Fixed
+- A pause saved before a failed snapshot write still protects subsequent explicit refreshes.
+- Recovery requires successful fetches spanning six hours; idle time before the first success
+  does not qualify.
+- Queued hide/show requests preserve their original request time and republish visibility
+  without repeating a fetch that already satisfied the request.
+- Large supported provider lists retain their learned intervals when scheduling state is
+  saved and reloaded.
+
+### Upgrading
+Run the install command again. Existing settings, plugins and usage snapshots are kept.
+The private scheduling file is created automatically; no credential changes are needed.
+
 ## v2 (2026-10-19)
 
 Providers are plugins. The four integrations are now plugin directories, and anyone can add a
